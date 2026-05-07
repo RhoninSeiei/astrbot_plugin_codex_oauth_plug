@@ -1,4 +1,7 @@
 import sys
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -93,3 +96,38 @@ class AstrBotRegistrationTests(unittest.TestCase):
 
         for command_name in expected_commands:
             self.assertTrue(command_to_admin.get(command_name), command_name)
+
+    def test_plugin_imports_with_astrbot_package_path(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin_dir = (
+                Path(tmp)
+                / "data"
+                / "plugins"
+                / "astrbot_plugin_codex_oauth_plug"
+            )
+            shutil.copytree(
+                repo_root,
+                plugin_dir,
+                ignore=shutil.ignore_patterns(
+                    ".git",
+                    "__pycache__",
+                    "*.pyc",
+                    ".pytest_cache",
+                    ".ruff_cache",
+                ),
+            )
+            script = (
+                "import sys; "
+                f"sys.path.insert(0, {tmp!r}); "
+                "import data.plugins.astrbot_plugin_codex_oauth_plug.main"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                cwd=tmp,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)

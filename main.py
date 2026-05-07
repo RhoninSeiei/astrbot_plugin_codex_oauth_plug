@@ -8,15 +8,26 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
-from oauth_plug_openai_codex.registration import (
-    register_provider_adapter,
-    unregister_provider_adapter,
-)
-from oauth_plug_openai_codex.service import (
-    OpenAICodexOAuthService,
-    get_service,
-    set_service,
-)
+try:
+    from .oauth_plug_openai_codex.registration import (
+        register_provider_adapter,
+        unregister_provider_adapter,
+    )
+    from .oauth_plug_openai_codex.service import (
+        OpenAICodexOAuthService,
+        get_service,
+        set_service,
+    )
+except ImportError:
+    from oauth_plug_openai_codex.registration import (
+        register_provider_adapter,
+        unregister_provider_adapter,
+    )
+    from oauth_plug_openai_codex.service import (
+        OpenAICodexOAuthService,
+        get_service,
+        set_service,
+    )
 
 
 class OAuthPlugOpenAICodexPlugin(Star):
