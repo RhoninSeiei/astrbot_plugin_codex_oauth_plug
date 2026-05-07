@@ -18,6 +18,7 @@ try:
         unregister_provider_adapter,
     )
     from oauth_plug_openai_codex.service import PROVIDER_TYPE
+    from astrbot.core.config.default import CONFIG_METADATA_2
 
     ASTRBOT_AVAILABLE = True
 except Exception:
@@ -38,6 +39,17 @@ class AstrBotRegistrationTests(unittest.TestCase):
             provider_cls_map[PROVIDER_TYPE].provider_display_name,
             "OAuth_plug OpenAI Codex OAuth",
         )
+
+    def test_register_provider_adapter_injects_dashboard_template(self):
+        register_provider_adapter()
+
+        templates = CONFIG_METADATA_2["provider_group"]["metadata"]["provider"][
+            "config_template"
+        ]
+        template_name = "OAuth_plug OpenAI Codex OAuth"
+
+        self.assertIn(template_name, templates)
+        self.assertEqual(templates[template_name]["type"], PROVIDER_TYPE)
 
     def test_plugin_initialize_registers_provider_and_web_apis(self):
         class FakeContext:
