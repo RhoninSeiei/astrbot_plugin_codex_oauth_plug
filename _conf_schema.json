@@ -1,0 +1,105 @@
+{
+  "runtime": {
+    "description": "运行设置",
+    "type": "object",
+    "hint": "插件注册的 provider 类型为 oauth_plug_openai_codex_chat_completion。Provider 页面中新建该类型后，模型测试和聊天会通过插件保存的 OAuth 凭据请求 Codex backend。",
+    "items": {
+      "enabled": {
+        "description": "启用 OAuth_plug provider",
+        "type": "bool",
+        "default": true
+      },
+      "base_url": {
+        "description": "Codex backend 地址",
+        "type": "string",
+        "default": "https://chatgpt.com/backend-api/codex"
+      },
+      "proxy": {
+        "description": "HTTP 代理",
+        "type": "string",
+        "hint": "示例：http://127.0.0.1:7890。留空则不使用代理。",
+        "default": ""
+      },
+      "models": {
+        "description": "模型列表",
+        "type": "text",
+        "hint": "每行填写一个模型 ID，首行作为默认模型。示例：gpt-5.5。",
+        "default": "gpt-5.5\ngpt-5.4\ngpt-5.3-codex"
+      },
+      "oauth_refresh_skew_seconds": {
+        "description": "提前刷新秒数",
+        "type": "int",
+        "default": 300
+      }
+    }
+  },
+  "oauth": {
+    "description": "OAuth 凭据",
+    "type": "object",
+    "hint": "调用 /api/plug/oauth-plug-openai-codex/start 获取授权地址；完成登录后，将完整回调 URL、code#state 或 Codex auth.json 粘贴到 authorization_input，再调用 /api/plug/oauth-plug-openai-codex/complete。",
+    "items": {
+      "authorization_input": {
+        "description": "回调结果或 JSON 凭据",
+        "type": "text",
+        "default": ""
+      },
+      "last_authorize_url": {
+        "description": "最近生成的授权地址",
+        "type": "text",
+        "default": ""
+      },
+      "last_state": {
+        "description": "最近生成的 state",
+        "type": "string",
+        "default": ""
+      },
+      "auth_mode": {
+        "description": "认证模式",
+        "type": "string",
+        "default": "manual"
+      },
+      "oauth_provider": {
+        "description": "OAuth provider",
+        "type": "string",
+        "default": ""
+      },
+      "oauth_access_token": {
+        "description": "Access token",
+        "type": "text",
+        "default": ""
+      },
+      "oauth_refresh_token": {
+        "description": "Refresh token",
+        "type": "text",
+        "default": ""
+      },
+      "oauth_expires_at": {
+        "description": "过期时间",
+        "type": "string",
+        "default": ""
+      },
+      "oauth_account_email": {
+        "description": "账号邮箱",
+        "type": "string",
+        "default": ""
+      },
+      "oauth_account_id": {
+        "description": "ChatGPT account id",
+        "type": "string",
+        "default": ""
+      }
+    }
+  },
+  "advanced": {
+    "description": "高级设置",
+    "type": "object",
+    "items": {
+      "generated_image_dir": {
+        "description": "生图保存目录",
+        "type": "string",
+        "hint": "留空时保存到 AstrBot data/generated/oauth_plug_openai_codex_images。",
+        "default": ""
+      }
+    }
+  }
+}

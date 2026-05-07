@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex OAuth Plug Config Mock</title>
+  <style>
+    :root {
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --line: #e4e8ef;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --accent: #1d9bf0;
+      --soft: #e9f4fe;
+      --green: #10b981;
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    .frame {
+      width: 1100px;
+      margin: 0 auto;
+      padding: 34px 42px 42px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 28px;
+      font-weight: 700;
+    }
+    .brand small {
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+    .pill {
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: var(--soft);
+      color: #0369a1;
+      font-size: 14px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      box-shadow: 0 18px 38px rgba(15, 23, 42, 0.08);
+      overflow: hidden;
+    }
+    .header {
+      padding: 28px 32px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: linear-gradient(135deg, #ffffff 0%, #eef8ff 100%);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 30px;
+    }
+    .desc {
+      color: var(--muted);
+      font-size: 15px;
+    }
+    .switch {
+      width: 66px;
+      height: 36px;
+      background: #7bc4ee;
+      border-radius: 999px;
+      padding: 4px;
+      display: flex;
+      justify-content: flex-end;
+    }
+    .knob {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      background: #ffffff;
+      box-shadow: 0 2px 8px rgba(15, 23, 42, 0.18);
+    }
+    .section {
+      padding: 26px 32px;
+      border-bottom: 1px solid var(--line);
+    }
+    .section:last-child {
+      border-bottom: 0;
+    }
+    .section-title {
+      margin: 0 0 18px;
+      font-size: 20px;
+      font-weight: 700;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      gap: 14px 22px;
+      align-items: center;
+    }
+    label {
+      color: #111827;
+      font-size: 15px;
+    }
+    input, textarea {
+      width: 100%;
+      border: 1px solid #cfd7e3;
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 15px;
+      background: #ffffff;
+      color: #111827;
+      outline: none;
+    }
+    textarea {
+      height: 94px;
+      resize: none;
+      line-height: 1.45;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: -6px;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 18px;
+    }
+    .btn {
+      border: 0;
+      border-radius: 10px;
+      padding: 11px 16px;
+      font-size: 14px;
+      color: #ffffff;
+      background: var(--accent);
+      box-shadow: 0 10px 18px rgba(29, 155, 240, 0.22);
+    }
+    .btn.secondary {
+      color: #0369a1;
+      background: #e0f2fe;
+      box-shadow: none;
+    }
+    .command-list {
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      gap: 12px 22px;
+      margin-top: 18px;
+      align-items: center;
+    }
+    .command-note {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 13px 16px;
+      border-radius: 12px;
+      background: #dcfce7;
+      color: #047857;
+      font-weight: 600;
+      margin-bottom: 18px;
+    }
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: var(--green);
+    }
+    .provider {
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      gap: 14px 22px;
+      align-items: center;
+    }
+    code {
+      padding: 3px 7px;
+      border-radius: 7px;
+      background: #eef2ff;
+      color: #3730a3;
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <main class="frame">
+    <div class="topbar">
+      <div class="brand">AstrBot <small>插件配置</small></div>
+      <div class="pill">astrbot_plugin_codex_oauth_plug</div>
+    </div>
+    <section class="card">
+      <div class="header">
+        <div>
+          <h1>Codex OAuth Plug</h1>
+          <div class="desc">通过插件注册 OAuth_plug OpenAI Codex Provider，其他插件按普通模型调用。</div>
+        </div>
+        <div class="switch"><div class="knob"></div></div>
+      </div>
+      <div class="section">
+        <h2 class="section-title">运行设置</h2>
+        <div class="grid">
+          <label>Codex backend 地址</label>
+          <input value="https://chatgpt.com/backend-api/codex">
+          <label>HTTP 代理</label>
+          <input value="http://127.0.0.1:7890">
+          <label>模型列表</label>
+          <textarea>gpt-5.5
+gpt-5.4
+gpt-5.3-codex</textarea>
+          <label>提前刷新秒数</label>
+          <input value="300">
+        </div>
+      </div>
+      <div class="section">
+        <h2 class="section-title">OAuth 凭据</h2>
+        <div class="status"><span class="dot"></span>已绑定账号态 OAuth，令牌会自动刷新</div>
+        <div class="grid">
+          <label>回调结果或 JSON 凭据</label>
+          <textarea>http://localhost:1455/auth/callback?code=EXAMPLE_CODE&amp;state=EXAMPLE_STATE</textarea>
+          <label>最近生成的授权地址</label>
+          <textarea>https://auth.openai.com/oauth/authorize?response_type=code&amp;client_id=PUBLIC_CLIENT_ID&amp;code_challenge=EXAMPLE_CHALLENGE&amp;state=EXAMPLE_STATE</textarea>
+          <label>账号邮箱</label>
+          <input value="codex@example.com">
+          <label>过期时间</label>
+          <input value="2026-05-17T16:46:53+00:00">
+        </div>
+        <div class="command-list">
+          <label>管理员命令</label>
+          <div>
+            <code>codex_oauth_start</code>
+            <code>codex_oauth_complete &lt;回调地址&gt;</code>
+            <code>codex_oauth_refresh</code>
+            <code>codex_oauth_test</code>
+          </div>
+          <label>使用说明</label>
+          <div class="command-note">
+            插件配置页负责保存参数；授权、刷新和连接测试由管理员聊天命令或插件 Web API 触发。
+          </div>
+        </div>
+      </div>
+      <div class="section">
+        <h2 class="section-title">模型提供商</h2>
+        <div class="provider">
+          <label>Provider 类型</label>
+          <code>oauth_plug_openai_codex_chat_completion</code>
+          <label>Provider ID 示例</label>
+          <code>oauth_plug_openai_codex/gpt-5.5</code>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
