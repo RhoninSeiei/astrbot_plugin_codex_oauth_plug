@@ -5,6 +5,8 @@
 
 AstrBot 的 Codex OAuth Provider 插件。插件会注册一个普通聊天模型提供商，其他插件和 AstrBot 本体可以按标准 provider 调用，无需处理 OAuth token。
 
+当前插件可以正常运行，有些功能是和AI大人合作的，还在实验中，欢迎反馈。
+
 本项目与 AstrBot 社区需求 [AstrBotDevs/AstrBot#5206: [Feature] 支持 OpenAI OAuth](https://github.com/AstrBotDevs/AstrBot/issues/5206) 相关。
 
 Provider 类型：
@@ -23,13 +25,16 @@ oauth_plug_openai_codex_chat_completion
 
 1. 安装并启用插件。
 2. 在插件配置中填写代理和模型列表，例如 `http://127.0.0.1:7890`、`gpt-5.5`。配置页主要用于查看状态、填写参数和检查最近生成的授权信息。
-3. 管理员发送 `codex_oauth_start` 获取授权地址。
-4. 在浏览器完成 OpenAI 登录后，复制完整回调 URL。
-5. 管理员发送 `codex_oauth_complete <完整回调地址>` 完成绑定。
-6. 管理员发送 `codex_oauth_test` 测试连接和端侧延迟。
-7. 在模型提供商页面新增类型为 `oauth_plug_openai_codex_chat_completion` 的模型，然后按普通模型使用。
+3. 管理员发送 `codex_oauth_start` 获取授权地址。<img width="608" height="338" alt="image" src="https://github.com/user-attachments/assets/b912302b-844c-48a1-8121-9180ffb342f4" />
+4. 在浏览器完成 OpenAI 登录后，复制完整回调 URL。<img width="541" height="703" alt="03d9c240acb998532c0bebda02587589" src="https://github.com/user-attachments/assets/c99b0672-70cb-4bfd-b7a9-ed834151641a" /><img width="1059" height="82" alt="f6ae88f15eaeb11d23d27ed88dd7a369" src="https://github.com/user-attachments/assets/f22402f6-4d16-4a97-b9da-f02cc7e9c2f3" />
+5. 管理员发送 `codex_oauth_complete <完整回调地址>` 完成绑定。<img width="608" height="177" alt="image" src="https://github.com/user-attachments/assets/81ba9677-f6fe-46aa-9727-625d3d47dc70" />
+6. 在模型提供商页面新增类型为 `oauth_plug_openai_codex_chat_completion` 的模型，然后按普通模型使用。<img width="992" height="1251" alt="image" src="https://github.com/user-attachments/assets/7b3dc6bd-ca12-4644-91b9-a8cb2546efaf" />
+<img width="902" height="1000" alt="image" src="https://github.com/user-attachments/assets/f45d3a9b-ee67-4515-a4c0-7d11912483bb" /><img width="900" height="895" alt="image" src="https://github.com/user-attachments/assets/80255398-b6fe-47d3-b9d8-3088b8f6e0e4" /><img width="739" height="687" alt="image" src="https://github.com/user-attachments/assets/1b9f5596-215a-4d97-99be-8df9a4638876" />
 
-模型列表按行填写，首行作为默认模型。默认示例：
+
+
+
+模型列表按行填写，用于提供商配置页面的标题（实际以提供商配置页面为准）。默认示例：
 
 ```text
 gpt-5.5
@@ -47,7 +52,6 @@ gpt-5.3-codex
 codex_oauth_start
 codex_oauth_complete <完整回调地址/code#state/Codex auth.json>
 codex_oauth_refresh
-codex_oauth_test [模型 ID]
 ```
 
 `codex_oauth_start` 会生成授权地址，并写入配置中的 `last_authorize_url`。`codex_oauth_complete` 完成绑定后会清空临时授权字段。`codex_oauth_test` 会发送一次最小 Codex backend `/responses` 请求，并返回端侧延迟。
@@ -63,14 +67,6 @@ POST /api/plug/oauth-plug-openai-codex/disconnect
 ```
 
 `refresh` 用于手动刷新令牌。正常模型调用时，插件也会在 token 即将过期或遇到 `401/403` 时自动刷新。
-
-`test` 用于发送一次最小 Codex backend `/responses` 请求，并返回模型 ID、HTTP 状态和端侧延迟。请求体示例：
-
-```json
-{
-  "model": "gpt-5.5"
-}
-```
 
 当前 AstrBot 插件配置 schema 以表单渲染为主，授权、刷新和测试通过管理员聊天命令或 Web API 触发。
 
