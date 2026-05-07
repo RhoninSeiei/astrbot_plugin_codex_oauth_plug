@@ -184,3 +184,4 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(post[2]["Authorization"], "Bearer access-token")
         self.assertEqual(post[2]["chatgpt-account-id"], "account-id")
         self.assertEqual(post[3]["model"], "gpt-5.5")
+        self.assertEqual(post[3]["instructions"], "请只回复 ok")

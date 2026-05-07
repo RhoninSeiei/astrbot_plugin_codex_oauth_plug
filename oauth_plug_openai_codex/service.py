@@ -217,11 +217,12 @@ class OpenAICodexOAuthService:
 
         payload: dict[str, Any] = {
             "model": model,
+            "instructions": "请只回复 ok",
             "input": [
                 {
                     "type": "message",
                     "role": "user",
-                    "content": "请只回复 ok",
+                    "content": [{"type": "input_text", "text": "ping"}],
                 }
             ],
             "stream": True,

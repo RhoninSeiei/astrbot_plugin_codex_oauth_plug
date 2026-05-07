@@ -8,7 +8,7 @@ from .service import OAUTH_PLACEHOLDER_KEY, PROVIDER_TYPE
 PROVIDER_TEMPLATE_NAME = "OAuth_plug OpenAI Codex OAuth"
 
 DEFAULT_PROVIDER_CONFIG: dict[str, Any] = {
-    "id": "oauth_plug_openai_codex/gpt-5.5",
+    "id": "oauth_plug_openai_codex",
     "type": PROVIDER_TYPE,
     "enable": False,
     "provider": "openai",
