@@ -1,5 +1,9 @@
 # 更新日志
 
+## 未发布
+
+- 同步 AstrBot 本体整合版 OAuth 图像能力，支持 `generate_image()` 传入参考图并自动使用图片编辑请求。
+
 ## v0.1.3
 
 - 注册 provider 模板到 AstrBot 模型服务提供商页面，使新增提供商菜单可显示 `OAuth_plug OpenAI Codex OAuth`。

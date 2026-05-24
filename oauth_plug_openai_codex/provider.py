@@ -4,6 +4,7 @@ import asyncio
 import base64
 import inspect
 import json
+import mimetypes
 import uuid
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -39,7 +40,7 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
         "function_call": True,
         "reasoning": True,
         "image_generate": True,
-        "image_edit": False,
+        "image_edit": True,
     }
 
     def __init__(self, provider_config, provider_settings) -> None:
@@ -626,30 +627,92 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
         size: str | None = None,
         n: int = 1,
         reference_images: list[str] | None = None,
+        action: str | None = None,
     ) -> list[OAuthPlugImageResult]:
-        if reference_images:
-            raise NotImplementedError("OAuth_plug 生图暂未支持参考图输入。")
+        references = [
+            str(image).strip() for image in reference_images or [] if str(image).strip()
+        ]
+        instructions = str(prompt or "").strip()
+        if not instructions:
+            raise ValueError("图片生成提示词不能为空。")
+        image_input = self._build_image_generation_input(instructions, references)
+        image_action = (action or ("edit" if references else "generate")).strip()
+        if not image_action:
+            image_action = "edit" if references else "generate"
 
         results: list[OAuthPlugImageResult] = []
         count = max(1, int(n or 1))
         for _ in range(count):
             tool: dict[str, Any] = {
                 "type": "image_generation",
-                "action": "generate",
+                "action": image_action,
             }
             if size:
                 tool["size"] = size
             payload = {
                 "model": model or self.get_model(),
-                "input": prompt,
+                "input": image_input,
+                "instructions": instructions,
                 "tools": [tool],
                 "tool_choice": {"type": "image_generation"},
-                "stream": False,
+                "stream": True,
                 "store": False,
             }
             response = await self._request_backend(payload)
             results.extend(await self._extract_generated_images(response))
         return results
+
+    def _build_image_generation_input(
+        self,
+        prompt: str,
+        reference_images: list[str],
+    ) -> list[dict[str, Any]]:
+        image_parts = [
+            self._reference_image_to_input_part(image)
+            for image in reference_images
+            if str(image or "").strip()
+        ]
+        return [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": prompt,
+                    },
+                    *image_parts,
+                ],
+            }
+        ]
+
+    def _reference_image_to_input_part(self, image: str) -> dict[str, str]:
+        return {
+            "type": "input_image",
+            "image_url": self._reference_image_to_image_url(image),
+        }
+
+    def _reference_image_to_image_url(self, image: str) -> str:
+        value = str(image or "").strip()
+        if not value:
+            raise ValueError("参考图不能为空。")
+
+        lower = value.lower()
+        if lower.startswith("data:image/"):
+            return value
+        if lower.startswith(("http://", "https://")):
+            return value
+
+        path_value = value[7:] if lower.startswith("file://") else value
+        path = Path(path_value).expanduser()
+        if not path.is_file():
+            raise ValueError(f"参考图文件不存在: {value}")
+
+        mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
+        if not mime_type.startswith("image/"):
+            mime_type = "image/png"
+        encoded = base64.b64encode(path.read_bytes()).decode()
+        return f"data:{mime_type};base64,{encoded}"
 
     async def _extract_generated_images(
         self,
