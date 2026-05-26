@@ -6,6 +6,7 @@ import types
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 
 def _install_fake_astrbot_runtime():
@@ -105,9 +106,76 @@ class ProviderImageGenerationTests(unittest.TestCase):
         provider.provider_config = {
             "model": "gpt-5.5",
             "generated_image_dir": generated_image_dir,
+            "oauth_access_token": "access-token",
+            "oauth_account_id": "account-id",
         }
         provider.model_name = "gpt-5.5"
+        provider.account_id = "account-id"
+        provider.base_url = "https://chatgpt.example/backend-api/codex"
+        provider.timeout = 30
+        provider._oauth_refresh_lock = asyncio.Lock()
         return provider
+
+    def test_generate_image_without_reference_builds_generate_payload(self):
+        with TemporaryDirectory() as tmp:
+            output_image_bytes = b"\x89PNG\r\n\x1a\noutput"
+            requested_payloads = []
+            provider = self._make_provider(tmp)
+
+            async def fake_request_image_backend(payload):
+                requested_payloads.append(payload)
+                return {
+                    "output": [
+                        {
+                            "type": "image_generation_call",
+                            "result": base64.b64encode(output_image_bytes).decode(),
+                            "revised_prompt": "generated",
+                        }
+                    ]
+                }
+
+            provider._request_image_backend = fake_request_image_backend
+
+            results = asyncio.run(
+                provider.generate_image(
+                    prompt="draw a city under rain",
+                    model="gpt-5.4",
+                    size="1024x1024",
+                )
+            )
+
+            payload = requested_payloads[0]
+            self.assertEqual(payload["model"], "gpt-5.4")
+            self.assertEqual(payload["instructions"], "draw a city under rain")
+            self.assertEqual(
+                payload["tools"],
+                [
+                    {
+                        "type": "image_generation",
+                        "action": "generate",
+                        "size": "1024x1024",
+                    }
+                ],
+            )
+            self.assertEqual(
+                payload["input"],
+                [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "draw a city under rain",
+                            },
+                        ],
+                    }
+                ],
+            )
+            self.assertTrue(payload["stream"])
+            self.assertEqual(payload["tool_choice"], {"type": "image_generation"})
+            self.assertEqual(Path(results[0].path).read_bytes(), output_image_bytes)
+            self.assertTrue(ProviderOAuthPlugOpenAICodex.capabilities["image_generate"])
 
     def test_generate_image_with_reference_file_builds_image_edit_payload(self):
         with TemporaryDirectory() as tmp:
@@ -119,7 +187,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
             requested_payloads = []
             provider = self._make_provider(str(tmp_path / "generated"))
 
-            async def fake_request_backend(payload):
+            async def fake_request_image_backend(payload):
                 requested_payloads.append(payload)
                 return {
                     "output": [
@@ -131,7 +199,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                     ]
                 }
 
-            provider._request_backend = fake_request_backend
+            provider._request_image_backend = fake_request_image_backend
 
             results = asyncio.run(
                 provider.generate_image(
@@ -191,7 +259,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
             requested_payloads = []
             provider = self._make_provider(tmp)
 
-            async def fake_request_backend(payload):
+            async def fake_request_image_backend(payload):
                 requested_payloads.append(payload)
                 return {
                     "output": [
@@ -202,7 +270,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                     ]
                 }
 
-            provider._request_backend = fake_request_backend
+            provider._request_image_backend = fake_request_image_backend
 
             asyncio.run(
                 provider.generate_image(
@@ -229,6 +297,134 @@ class ProviderImageGenerationTests(unittest.TestCase):
                     "image_url": data_url,
                 },
             )
+
+    def test_generate_image_reads_sse_incrementally(self):
+        with TemporaryDirectory() as tmp:
+            image_bytes = b"\x89PNG\r\n\x1a\nstreamed"
+            image_base64 = base64.b64encode(image_bytes).decode()
+            sent_requests = []
+            provider = self._make_provider(tmp)
+
+            class FakeStreamResponse:
+                status_code = 200
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def aread(self):
+                    raise AssertionError(
+                        "image generation should not read the full SSE body"
+                    )
+
+                async def aiter_lines(self):
+                    yield "event: response.output_item.done"
+                    yield (
+                        'data: {"type":"response.output_item.done","item":'
+                        '{"id":"ig_test","type":"image_generation_call",'
+                        f'"result":"{image_base64}",'
+                        '"revised_prompt":"streamed prompt"}'
+                        ',"output_index":0}'
+                    )
+                    yield ""
+                    yield "event: response.completed"
+                    yield (
+                        'data: {"type":"response.completed","response":'
+                        '{"id":"resp_img","output":[]}}'
+                    )
+                    yield ""
+
+            class FakeClient:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    return False
+
+                async def post(self, *args, **kwargs):
+                    raise AssertionError("image generation should use an SSE stream")
+
+                def stream(self, method, url, **kwargs):
+                    sent_requests.append(
+                        {
+                            "method": method,
+                            "url": url,
+                            **kwargs,
+                        }
+                    )
+                    return FakeStreamResponse()
+
+            with patch("oauth_plug_openai_codex.provider.httpx.AsyncClient", FakeClient):
+                results = asyncio.run(provider.generate_image("draw streamed image"))
+
+            self.assertEqual(sent_requests[0]["method"], "POST")
+            self.assertTrue(sent_requests[0]["url"].endswith("/responses"))
+            self.assertEqual(
+                sent_requests[0]["headers"]["Authorization"],
+                "Bearer access-token",
+            )
+            self.assertEqual(sent_requests[0]["json"]["stream"], True)
+            self.assertEqual(
+                sent_requests[0]["json"]["tools"],
+                [
+                    {
+                        "type": "image_generation",
+                        "action": "generate",
+                    }
+                ],
+            )
+            self.assertEqual(results[0].revised_prompt, "streamed prompt")
+            self.assertEqual(Path(results[0].path).read_bytes(), image_bytes)
+
+    def test_other_plugin_can_call_generate_image_on_provider_instance(self):
+        with TemporaryDirectory() as tmp:
+            output_image_bytes = b"\x89PNG\r\n\x1a\nexternal"
+            provider = self._make_provider(tmp)
+            requested_payloads = []
+
+            async def fake_request_image_backend(payload):
+                requested_payloads.append(payload)
+                return {
+                    "output": [
+                        {
+                            "type": "image_generation_call",
+                            "result": base64.b64encode(output_image_bytes).decode(),
+                        }
+                    ]
+                }
+
+            provider._request_image_backend = fake_request_image_backend
+
+            class FakeContext:
+                def get_provider_by_id(self, provider_id):
+                    self.requested_provider_id = provider_id
+                    return provider
+
+            async def external_plugin_call(context):
+                selected = context.get_provider_by_id(
+                    "oauth_plug_openai_codex_chat_completion/gpt-5.5"
+                )
+                self.assertTrue(selected.capabilities["image_generate"])
+                self.assertTrue(selected.capabilities["image_edit"])
+                return await selected.generate_image(
+                    prompt="external plugin image",
+                    n=1,
+                )
+
+            context = FakeContext()
+            results = asyncio.run(external_plugin_call(context))
+
+            self.assertEqual(
+                context.requested_provider_id,
+                "oauth_plug_openai_codex_chat_completion/gpt-5.5",
+            )
+            self.assertEqual(requested_payloads[0]["instructions"], "external plugin image")
+            self.assertEqual(Path(results[0].path).read_bytes(), output_image_bytes)
 
 
 if __name__ == "__main__":

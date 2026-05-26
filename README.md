@@ -28,7 +28,7 @@ oauth_plug_openai_codex_chat_completion
 3. 管理员发送 `codex_oauth_start` 获取授权地址。<img width="608" height="338" alt="image" src="https://github.com/user-attachments/assets/b912302b-844c-48a1-8121-9180ffb342f4" />
 4. 在浏览器完成 OpenAI 登录后，复制完整回调 URL。<img width="541" height="703" alt="03d9c240acb998532c0bebda02587589" src="https://github.com/user-attachments/assets/c99b0672-70cb-4bfd-b7a9-ed834151641a" /><img width="1059" height="82" alt="f6ae88f15eaeb11d23d27ed88dd7a369" src="https://github.com/user-attachments/assets/f22402f6-4d16-4a97-b9da-f02cc7e9c2f3" />
 5. 管理员发送 `codex_oauth_complete <完整回调地址>` 完成绑定。<img width="608" height="177" alt="image" src="https://github.com/user-attachments/assets/81ba9677-f6fe-46aa-9727-625d3d47dc70" />
-6. 在模型提供商页面新增类型为 `oauth_plug_openai_codex_chat_completion` 的模型，然后按普通模型使用。<img width="992" height="1251" alt="image" src="https://github.com/user-attachments/assets/7b3dc6bd-ca12-4644-91b9-a8cb2546efaf" />
+6. 在模型提供商页面新增类型为 `oauth_plug_openai_codex_chat_completion` 的模型，然后按普通模型使用。该 provider 同时声明 `image_generate` 和 `image_edit`，其他插件可通过 provider 实例调用 `generate_image()` 进行文生图和参考图编辑。<img width="992" height="1251" alt="image" src="https://github.com/user-attachments/assets/7b3dc6bd-ca12-4644-91b9-a8cb2546efaf" />
 <img width="902" height="1000" alt="image" src="https://github.com/user-attachments/assets/f45d3a9b-ee67-4515-a4c0-7d11912483bb" /><img width="900" height="895" alt="image" src="https://github.com/user-attachments/assets/80255398-b6fe-47d3-b9d8-3088b8f6e0e4" /><img width="739" height="687" alt="image" src="https://github.com/user-attachments/assets/1b9f5596-215a-4d97-99be-8df9a4638876" />
 
 
@@ -52,9 +52,44 @@ gpt-5.3-codex
 codex_oauth_start
 codex_oauth_complete <完整回调地址/code#state/Codex auth.json>
 codex_oauth_refresh
+codex_oauth_test
 ```
 
 `codex_oauth_start` 会生成授权地址，并写入配置中的 `last_authorize_url`。`codex_oauth_complete` 完成绑定后会清空临时授权字段。`codex_oauth_test` 会发送一次最小 Codex backend `/responses` 请求，并返回端侧延迟。
+
+### 生图调用
+
+其他插件需要调用 OAuth 生图能力时，可从 AstrBot context 取得 provider 实例，再检查能力字段并调用 `generate_image()`：
+
+```python
+provider = context.get_provider_by_id(provider_id)
+# 也可以使用当前会话正在使用的 provider：
+# provider = context.get_using_provider(event.unified_msg_origin)
+
+if not provider or not getattr(provider, "capabilities", {}).get("image_generate"):
+    raise RuntimeError("当前 provider 缺少生图能力")
+
+images = await provider.generate_image(
+    prompt="根据参考图重绘背景",
+    model="gpt-5.5",
+    size="1024x1024",
+    n=1,
+    reference_images=["/tmp/reference.png"],
+)
+```
+
+`provider_id` 取模型服务提供商页面中的实际 provider ID。`reference_images` 支持本地文件路径、`file://` 路径、HTTP 图片地址和 `data:image/...`；传入参考图时默认使用图片编辑请求，未传参考图时默认使用文生图请求。`action` 可显式传入 `generate`、`edit` 或 backend 支持的其他取值。
+
+返回值是图片结果对象列表，常用字段为：
+
+```python
+image.path
+image.mime_type
+image.revised_prompt
+image.raw
+```
+
+`path` 指向已经写入磁盘的生成图片文件。`generated_image_dir` 可在插件高级配置中指定保存目录；留空时，图片会保存到 AstrBot data 下的 `generated/oauth_plug_openai_codex_images`。
 
 ### Web API
 

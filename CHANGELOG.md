@@ -2,7 +2,9 @@
 
 ## 未发布
 
+- 同步 AstrBot 本体整合版 OAuth 生图专用 SSE 请求分支，供 `generate_image()` 增量读取图片生成事件。
 - 同步 AstrBot 本体整合版 OAuth 图像能力，支持 `generate_image()` 传入参考图并自动使用图片编辑请求。
+- README 补充其他插件调用 `generate_image()` 的方法、参考图输入类型和生成文件保存位置。
 
 ## v0.1.3
 
