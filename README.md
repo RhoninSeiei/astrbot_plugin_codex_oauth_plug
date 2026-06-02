@@ -59,22 +59,27 @@ codex_oauth_test
 
 ### 生图调用
 
-其他插件需要调用 OAuth 生图能力时，可从 AstrBot context 取得 provider 实例，再检查能力字段并调用 `generate_image()`：
+其他插件调用 OAuth 生图能力时，可从 AstrBot context 取得 provider 实例，再按用途检查能力字段。文生图需要 `image_generate`；传入参考图进行编辑时同时需要 `image_edit`。
 
 ```python
 provider = context.get_provider_by_id(provider_id)
-# 也可以使用当前会话正在使用的 provider：
-# provider = context.get_using_provider(event.unified_msg_origin)
+# 或使用当前会话正在使用的 provider：
+# provider = context.get_using_provider(umo=event.unified_msg_origin)
 
-if not provider or not getattr(provider, "capabilities", {}).get("image_generate"):
+capabilities = getattr(provider, "capabilities", {}) if provider else {}
+if not capabilities.get("image_generate"):
     raise RuntimeError("当前 provider 缺少生图能力")
+
+reference_images = ["/tmp/reference.png"]
+if reference_images and not capabilities.get("image_edit"):
+    raise RuntimeError("当前 provider 缺少参考图编辑能力")
 
 images = await provider.generate_image(
     prompt="根据参考图重绘背景",
     model="gpt-5.5",
     size="1024x1024",
     n=1,
-    reference_images=["/tmp/reference.png"],
+    reference_images=reference_images,
 )
 ```
 
@@ -89,7 +94,7 @@ image.revised_prompt
 image.raw
 ```
 
-`path` 指向已经写入磁盘的生成图片文件。`generated_image_dir` 可在插件高级配置中指定保存目录；留空时，图片会保存到 AstrBot data 下的 `generated/oauth_plug_openai_codex_images`。
+`path` 指向已经写入磁盘的生成图片文件，调用方可按 AstrBot 消息组件或自身业务逻辑继续发送、读取或转存该文件。`generated_image_dir` 可在插件高级配置中指定保存目录；留空时，图片会保存到 AstrBot data 下的 `generated/oauth_plug_openai_codex_images`。
 
 ### Web API
 

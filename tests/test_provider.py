@@ -381,9 +381,70 @@ class ProviderImageGenerationTests(unittest.TestCase):
             self.assertEqual(results[0].revised_prompt, "streamed prompt")
             self.assertEqual(Path(results[0].path).read_bytes(), image_bytes)
 
-    def test_other_plugin_can_call_generate_image_on_provider_instance(self):
+    def test_parse_backend_response_merges_sse_items_and_text_delta(self):
+        provider = self._make_provider("/tmp")
+        text = """
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"hello "}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"world"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"ig_test","type":"image_generation_call","result":"first"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"ig_test","type":"image_generation_call","result":"duplicate"}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
+""".strip()
+
+        response = provider._parse_backend_response(text)
+
+        self.assertEqual(response["output_text"], "hello world")
+        self.assertEqual(len(response["output"]), 1)
+        self.assertEqual(response["output"][0]["result"], "first")
+
+    def test_request_image_backend_refreshes_token_after_unauthorized_response(self):
+        provider = self._make_provider("/tmp")
+        calls = []
+        refreshes = []
+
+        async def fake_ensure_fresh_oauth_token():
+            return None
+
+        async def fake_request_image_backend_once(payload):
+            calls.append(payload)
+            if len(calls) == 1:
+                return 401, 'data: {"type":"response.error","error":"expired"}'
+            return 200, (
+                'data: {"type":"response.completed","response":'
+                '{"id":"resp_test","output":[{"type":"image_generation_call",'
+                '"result":"cmVmcmVzaGVk"}]}}'
+            )
+
+        async def fake_refresh_oauth_token():
+            refreshes.append(True)
+            return True
+
+        provider._ensure_fresh_oauth_token = fake_ensure_fresh_oauth_token
+        provider._request_image_backend_once = fake_request_image_backend_once
+        provider._refresh_oauth_token = fake_refresh_oauth_token
+
+        response = asyncio.run(provider._request_image_backend({"stream": True}))
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(refreshes), 1)
+        self.assertEqual(response["output"][0]["result"], "cmVmcmVzaGVk")
+
+    def test_other_plugin_can_call_generate_image_with_reference_image(self):
         with TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
             output_image_bytes = b"\x89PNG\r\n\x1a\nexternal"
+            reference_image_bytes = b"\x89PNG\r\n\x1a\nexternal-reference"
+            reference_path = tmp_path / "reference.png"
+            reference_path.write_bytes(reference_image_bytes)
             provider = self._make_provider(tmp)
             requested_payloads = []
 
@@ -414,6 +475,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 return await selected.generate_image(
                     prompt="external plugin image",
                     n=1,
+                    reference_images=[str(reference_path)],
                 )
 
             context = FakeContext()
@@ -424,6 +486,12 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 "oauth_plug_openai_codex_chat_completion/gpt-5.5",
             )
             self.assertEqual(requested_payloads[0]["instructions"], "external plugin image")
+            self.assertEqual(requested_payloads[0]["tools"][0]["action"], "edit")
+            self.assertEqual(
+                requested_payloads[0]["input"][0]["content"][1]["image_url"],
+                "data:image/png;base64,"
+                + base64.b64encode(reference_image_bytes).decode(),
+            )
             self.assertEqual(Path(results[0].path).read_bytes(), output_image_bytes)
 
 

@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- 补充 OAuth 生图扩展回归测试，覆盖 SSE 输出回填、重复输出去重、401/403 后刷新重试和其他插件带参考图调用。
 - 同步 AstrBot 本体整合版 OAuth 生图专用 SSE 请求分支，供 `generate_image()` 增量读取图片生成事件。
 - 同步 AstrBot 本体整合版 OAuth 图像能力，支持 `generate_image()` 传入参考图并自动使用图片编辑请求。
 - README 补充其他插件调用 `generate_image()` 的方法、参考图输入类型和生成文件保存位置。
