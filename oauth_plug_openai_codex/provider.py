@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import math
 import mimetypes
 import uuid
 from collections.abc import AsyncGenerator
@@ -308,12 +309,13 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
     async def _request_image_backend_once(
         self,
         payload: dict[str, Any],
+        request_timeout: float,
     ) -> tuple[int, str]:
         headers = self._build_backend_headers()
         text_parts: list[str] = []
         async with httpx.AsyncClient(
             proxy=self.provider_config.get("proxy") or None,
-            timeout=self.timeout,
+            timeout=request_timeout,
             follow_redirects=True,
         ) as client:
             async with client.stream(
@@ -348,15 +350,25 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
 
         return response.status_code, "\n".join(text_parts)
 
-    async def _request_image_backend(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _request_image_backend(
+        self,
+        payload: dict[str, Any],
+        request_timeout: float,
+    ) -> dict[str, Any]:
         await self._ensure_fresh_oauth_token()
-        status_code, text = await self._request_image_backend_once(payload)
+        status_code, text = await self._request_image_backend_once(
+            payload,
+            request_timeout,
+        )
 
         if status_code in {401, 403}:
             async with self._oauth_refresh_lock:
                 refreshed = await self._refresh_oauth_token()
             if refreshed:
-                status_code, text = await self._request_image_backend_once(payload)
+                status_code, text = await self._request_image_backend_once(
+                    payload,
+                    request_timeout,
+                )
 
         if status_code < 200 or status_code >= 300:
             raise Exception(self._format_backend_error(status_code, text))
@@ -834,7 +846,18 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
         n: int = 1,
         reference_images: list[str] | None = None,
         action: str | None = None,
+        timeout: float | None = None,
     ) -> list[OAuthPlugImageResult]:
+        if timeout is None:
+            request_timeout = self.timeout
+        else:
+            try:
+                request_timeout = float(timeout)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("timeout 必须是有限正浮点数。") from exc
+            if not math.isfinite(request_timeout) or request_timeout <= 0:
+                raise ValueError("timeout 必须是有限正浮点数。")
+
         references = [
             str(image).strip() for image in reference_images or [] if str(image).strip()
         ]
@@ -864,7 +887,7 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
                 "stream": True,
                 "store": False,
             }
-            response = await self._request_image_backend(payload)
+            response = await self._request_image_backend(payload, request_timeout)
             results.extend(await self._extract_generated_images(response))
         return results
 

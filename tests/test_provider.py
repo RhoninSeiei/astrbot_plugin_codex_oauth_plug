@@ -214,6 +214,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
     def test_text_and_image_requests_use_shared_header_builder(self):
         provider = self._make_provider("/tmp")
         requested_headers = []
+        requested_timeouts = []
         provider._build_backend_headers = lambda: {"X-Shared-Headers": "yes"}
 
         class FakePostResponse:
@@ -236,7 +237,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
         class FakeClient:
             def __init__(self, *args, **kwargs):
-                pass
+                requested_timeouts.append(kwargs["timeout"])
 
             async def __aenter__(self):
                 return self
@@ -254,7 +255,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
         async def make_requests():
             await provider._request_backend_once({"stream": True})
-            await provider._request_image_backend_once({"stream": True})
+            await provider._request_image_backend_once({"stream": True}, 12.5)
 
         with patch("oauth_plug_openai_codex.provider.httpx.AsyncClient", FakeClient):
             asyncio.run(make_requests())
@@ -263,6 +264,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
             requested_headers,
             [{"X-Shared-Headers": "yes"}, {"X-Shared-Headers": "yes"}],
         )
+        self.assertEqual(requested_timeouts, [provider.timeout, 12.5])
 
     def test_prepare_chat_payload_preserves_request_reasoning_controls(self):
         provider = self._make_provider("/tmp")
@@ -361,10 +363,12 @@ class ProviderImageGenerationTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             output_image_bytes = b"\x89PNG\r\n\x1a\noutput"
             requested_payloads = []
+            requested_timeouts = []
             provider = self._make_provider(tmp)
 
-            async def fake_request_image_backend(payload):
+            async def fake_request_image_backend(payload, request_timeout):
                 requested_payloads.append(payload)
+                requested_timeouts.append(request_timeout)
                 return {
                     "output": [
                         {
@@ -416,6 +420,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
             self.assertTrue(payload["stream"])
             self.assertEqual(payload["tool_choice"], {"type": "image_generation"})
             self.assertEqual(Path(results[0].path).read_bytes(), output_image_bytes)
+            self.assertEqual(requested_timeouts, [provider.timeout])
             self.assertTrue(ProviderOAuthPlugOpenAICodex.capabilities["image_generate"])
 
     def test_generate_image_with_reference_file_builds_image_edit_payload(self):
@@ -428,7 +433,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
             requested_payloads = []
             provider = self._make_provider(str(tmp_path / "generated"))
 
-            async def fake_request_image_backend(payload):
+            async def fake_request_image_backend(payload, request_timeout):
                 requested_payloads.append(payload)
                 return {
                     "output": [
@@ -500,7 +505,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
             requested_payloads = []
             provider = self._make_provider(tmp)
 
-            async def fake_request_image_backend(payload):
+            async def fake_request_image_backend(payload, request_timeout):
                 requested_payloads.append(payload)
                 return {
                     "output": [
@@ -544,6 +549,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
             image_bytes = b"\x89PNG\r\n\x1a\nstreamed"
             image_base64 = base64.b64encode(image_bytes).decode()
             sent_requests = []
+            client_timeouts = []
             provider = self._make_provider(tmp)
 
             class FakeStreamResponse:
@@ -579,7 +585,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
             class FakeClient:
                 def __init__(self, *args, **kwargs):
-                    pass
+                    client_timeouts.append(kwargs["timeout"])
 
                 async def __aenter__(self):
                     return self
@@ -603,7 +609,9 @@ class ProviderImageGenerationTests(unittest.TestCase):
             with patch(
                 "oauth_plug_openai_codex.provider.httpx.AsyncClient", FakeClient
             ):
-                results = asyncio.run(provider.generate_image("draw streamed image"))
+                results = asyncio.run(
+                    provider.generate_image("draw streamed image", timeout="45.5")
+                )
 
             self.assertEqual(sent_requests[0]["method"], "POST")
             self.assertTrue(sent_requests[0]["url"].endswith("/responses"))
@@ -623,6 +631,26 @@ class ProviderImageGenerationTests(unittest.TestCase):
             )
             self.assertEqual(results[0].revised_prompt, "streamed prompt")
             self.assertEqual(Path(results[0].path).read_bytes(), image_bytes)
+            self.assertEqual(client_timeouts, [45.5])
+            self.assertEqual(provider.timeout, 30)
+
+    def test_generate_image_rejects_invalid_timeout_before_backend_request(self):
+        provider = self._make_provider("/tmp")
+        requests = []
+
+        async def fake_request_image_backend(payload, request_timeout):
+            requests.append((payload, request_timeout))
+            return {"output": []}
+
+        provider._request_image_backend = fake_request_image_backend
+
+        for timeout in (0, -1, float("nan"), float("inf"), "invalid", object()):
+            with self.subTest(timeout=timeout):
+                with self.assertRaisesRegex(ValueError, "timeout"):
+                    asyncio.run(provider.generate_image("draw image", timeout=timeout))
+
+        self.assertEqual(requests, [])
+        self.assertEqual(provider.timeout, 30)
 
     def test_parse_backend_response_merges_sse_items_and_text_delta(self):
         provider = self._make_provider("/tmp")
@@ -657,8 +685,8 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
         async def fake_ensure_fresh_oauth_token():
             return None
 
-        async def fake_request_image_backend_once(payload):
-            calls.append(payload)
+        async def fake_request_image_backend_once(payload, request_timeout):
+            calls.append((payload, request_timeout))
             if len(calls) == 1:
                 return 401, 'data: {"type":"response.error","error":"expired"}'
             return 200, (
@@ -675,9 +703,17 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
         provider._request_image_backend_once = fake_request_image_backend_once
         provider._refresh_oauth_token = fake_refresh_oauth_token
 
-        response = asyncio.run(provider._request_image_backend({"stream": True}))
+        response = asyncio.run(
+            provider._request_image_backend({"stream": True}, 75.25)
+        )
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            calls,
+            [
+                ({"stream": True}, 75.25),
+                ({"stream": True}, 75.25),
+            ],
+        )
         self.assertEqual(len(refreshes), 1)
         self.assertEqual(response["output"][0]["result"], "cmVmcmVzaGVk")
 
@@ -691,7 +727,7 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
             provider = self._make_provider(tmp)
             requested_payloads = []
 
-            async def fake_request_image_backend(payload):
+            async def fake_request_image_backend(payload, request_timeout):
                 requested_payloads.append(payload)
                 return {
                     "output": [

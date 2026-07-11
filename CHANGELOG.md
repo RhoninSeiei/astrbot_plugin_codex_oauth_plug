@@ -2,6 +2,7 @@
 
 ## 未发布
 
+- 公共 `generate_image()` 增加可选的单次 `timeout` 参数，供 GroupChat、ImgFlow 等插件为图片请求单独设置超时，并保持 provider 默认超时值。
 - 默认模型组更新为 GPT-5.6 Sol、Terra 和 Luna，并保留旧模型及自定义模型配置兼容。
 - 为 AstrBot 4.24 补充核心请求重试模块缺失时的兼容分支。
 - 同步 `reasoning_effort` 规范化与覆盖优先级，拒绝单次 Provider 请求使用 `ultra`，旧模型的 `max` 转换为 `xhigh`。

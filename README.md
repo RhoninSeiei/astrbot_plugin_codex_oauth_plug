@@ -80,10 +80,13 @@ images = await provider.generate_image(
     size="1024x1024",
     n=1,
     reference_images=reference_images,
+    timeout=180.0,
 )
 ```
 
 `provider_id` 取模型服务提供商页面中的实际 provider ID。`reference_images` 支持本地文件路径、`file://` 路径、HTTP 图片地址和 `data:image/...`；传入参考图时默认使用图片编辑请求，未传参考图时默认使用文生图请求。`action` 可显式传入 `generate`、`edit` 或 backend 支持的其他取值。
+
+`timeout` 是可选的单次图片请求超时秒数，省略或传入 `None` 时使用 provider 默认超时。该参数只影响本次 `generate_image()` 调用，并保持 provider 默认超时值，适合 GroupChat、ImgFlow 等插件按图片任务单独设置等待时间。
 
 返回值是图片结果对象列表，常用字段为：
 
