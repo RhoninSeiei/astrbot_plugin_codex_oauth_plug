@@ -23,8 +23,8 @@
       "models": {
         "description": "模型列表",
         "type": "text",
-        "hint": "每行填写一个模型 ID，首行作为默认模型。示例：gpt-5.5。",
-        "default": "gpt-5.5\ngpt-5.4\ngpt-5.3-codex"
+        "hint": "每行填写一个模型 ID，首行作为默认模型。示例：gpt-5.6-sol。",
+        "default": "gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna"
       },
       "oauth_refresh_skew_seconds": {
         "description": "提前刷新秒数",

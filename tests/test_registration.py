@@ -1,11 +1,12 @@
-import unittest
 import sys
 import types
+import unittest
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from unittest.mock import patch
 
+from oauth_plug_openai_codex.registration import DEFAULT_PROVIDER_CONFIG
 from oauth_plug_openai_codex.service import PROVIDER_TYPE
 
 
@@ -67,6 +68,9 @@ def fake_astrbot_provider_environment():
 
 
 class RegistrationTests(unittest.TestCase):
+    def test_provider_template_defaults_to_gpt_5_6_sol(self):
+        self.assertEqual(DEFAULT_PROVIDER_CONFIG["model"], "gpt-5.6-sol")
+
     def test_provider_type_uses_oauth_plug_prefix(self):
         self.assertTrue(PROVIDER_TYPE.startswith("oauth_plug_"))
         self.assertEqual(PROVIDER_TYPE, "oauth_plug_openai_codex_chat_completion")

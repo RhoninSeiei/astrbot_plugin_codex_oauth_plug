@@ -13,7 +13,7 @@ DEFAULT_PROVIDER_CONFIG: dict[str, Any] = {
     "enable": False,
     "provider": "openai",
     "provider_type": "chat_completion",
-    "model": "gpt-5.5",
+    "model": "gpt-5.6-sol",
     "key": [OAUTH_PLACEHOLDER_KEY],
     "api_base": "https://chatgpt.com/backend-api/codex",
     "proxy": "",
@@ -53,9 +53,8 @@ def _remove_dashboard_provider_template() -> None:
 
 
 def register_provider_adapter() -> None:
-    from astrbot.core.provider.entities import ProviderMetaData
+    from astrbot.core.provider.entities import ProviderMetaData, ProviderType
     from astrbot.core.provider.register import provider_cls_map, provider_registry
-    from astrbot.core.provider.entities import ProviderType
 
     from .provider import ProviderOAuthPlugOpenAICodex
 

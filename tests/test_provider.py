@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import importlib
+import json
 import sys
 import types
 import unittest
@@ -24,7 +25,9 @@ def _install_fake_astrbot_runtime():
         warning=lambda *args, **kwargs: None,
     )
 
-    message_result_module = types.ModuleType("astrbot.core.message.message_event_result")
+    message_result_module = types.ModuleType(
+        "astrbot.core.message.message_event_result"
+    )
 
     class MessageChain:
         def __init__(self):
@@ -68,13 +71,33 @@ def _install_fake_astrbot_runtime():
     astrbot_path_module = types.ModuleType("astrbot.core.utils.astrbot_path")
     astrbot_path_module.get_astrbot_data_path = lambda: "/tmp"
 
-    openai_source_module = types.ModuleType("astrbot.core.provider.sources.openai_source")
+    openai_source_module = types.ModuleType(
+        "astrbot.core.provider.sources.openai_source"
+    )
 
     class ProviderOpenAIOfficial:
         def get_model(self):
             return getattr(self, "provider_config", {}).get("model", "")
 
+        async def _prepare_chat_payload(self, *args, **kwargs):
+            return {"messages": [], "model": kwargs.get("model", "")}, []
+
     openai_source_module.ProviderOpenAIOfficial = ProviderOpenAIOfficial
+
+    request_retry_module = types.ModuleType(
+        "astrbot.core.provider.sources.request_retry"
+    )
+
+    async def retry_provider_request(
+        provider_label,
+        request_factory,
+        *,
+        retry_rate_limits=True,
+        max_attempts=None,
+    ):
+        return await request_factory()
+
+    request_retry_module.retry_provider_request = retry_provider_request
 
     for name in [
         "astrbot.core",
@@ -85,36 +108,254 @@ def _install_fake_astrbot_runtime():
     ]:
         sys.modules.setdefault(name, types.ModuleType(name))
     sys.modules["astrbot"] = astrbot_module
-    sys.modules[
-        "astrbot.core.message.message_event_result"
-    ] = message_result_module
+    sys.modules["astrbot.core.message.message_event_result"] = message_result_module
     sys.modules["astrbot.core.provider.entities"] = entities_module
     sys.modules["astrbot.core.utils.astrbot_path"] = astrbot_path_module
-    sys.modules[
-        "astrbot.core.provider.sources.openai_source"
-    ] = openai_source_module
+    sys.modules["astrbot.core.provider.sources.openai_source"] = openai_source_module
+    sys.modules["astrbot.core.provider.sources.request_retry"] = request_retry_module
 
 
 _install_fake_astrbot_runtime()
 
-from oauth_plug_openai_codex.provider import ProviderOAuthPlugOpenAICodex
+from oauth_plug_openai_codex.provider import ProviderOAuthPlugOpenAICodex  # noqa: E402
+
+
+def _encode_test_jwt(claims):
+    def encode_part(value):
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{encode_part({'alg': 'none'})}.{encode_part(claims)}.signature"
 
 
 class ProviderImageGenerationTests(unittest.TestCase):
     def _make_provider(self, generated_image_dir: str):
         provider = ProviderOAuthPlugOpenAICodex.__new__(ProviderOAuthPlugOpenAICodex)
         provider.provider_config = {
-            "model": "gpt-5.5",
+            "model": "gpt-5.6-sol",
             "generated_image_dir": generated_image_dir,
             "oauth_access_token": "access-token",
             "oauth_account_id": "account-id",
         }
-        provider.model_name = "gpt-5.5"
+        provider.model_name = "gpt-5.6-sol"
+        provider.client = types.SimpleNamespace(
+            base_url=types.SimpleNamespace(host="chatgpt.example")
+        )
         provider.account_id = "account-id"
         provider.base_url = "https://chatgpt.example/backend-api/codex"
         provider.timeout = 30
         provider._oauth_refresh_lock = asyncio.Lock()
         return provider
+
+    def _run_query(self, provider, payloads, request_max_retries=None):
+        calls = []
+        retries = []
+
+        async def fake_request_backend(payload):
+            calls.append(payload)
+            return {"id": "resp_test", "output_text": "ok", "output": []}
+
+        async def fake_parse(response, tools):
+            return response
+
+        async def fake_retry(label, request_factory, *, max_attempts=None, **kwargs):
+            retries.append((label, max_attempts))
+            return await request_factory()
+
+        provider._request_backend = fake_request_backend
+        provider._parse_responses_completion = fake_parse
+        with patch(
+            "oauth_plug_openai_codex.provider.retry_provider_request",
+            fake_retry,
+        ):
+            result = asyncio.run(
+                provider._query(
+                    payloads,
+                    None,
+                    request_max_retries=request_max_retries,
+                )
+            )
+        return result, calls, retries
+
+    def test_provider_advertises_gpt_5_6_models(self):
+        capabilities = ProviderOAuthPlugOpenAICodex.model_capabilities
+
+        self.assertEqual(
+            list(capabilities)[:3],
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+        )
+        self.assertEqual(
+            capabilities["gpt-5.6-sol"]["default_reasoning_effort"],
+            "low",
+        )
+        self.assertIn(
+            "max",
+            capabilities["gpt-5.6-terra"]["supported_reasoning_efforts"],
+        )
+
+    def test_backend_headers_include_client_version_and_nested_residency(self):
+        provider = self._make_provider("/tmp")
+        provider.provider_config["oauth_access_token"] = _encode_test_jwt(
+            {
+                "https://api.openai.com/auth": {
+                    "chatgpt_data_residency": "us",
+                }
+            }
+        )
+        provider.provider_config["custom_headers"] = {"X-Plugin-Test": "enabled"}
+
+        headers = provider._build_backend_headers()
+
+        self.assertEqual(headers["version"], "0.144.0")
+        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.144.0")
+        self.assertEqual(headers["x-openai-internal-codex-residency"], "us")
+        self.assertEqual(headers["X-Plugin-Test"], "enabled")
+
+    def test_text_and_image_requests_use_shared_header_builder(self):
+        provider = self._make_provider("/tmp")
+        requested_headers = []
+        provider._build_backend_headers = lambda: {"X-Shared-Headers": "yes"}
+
+        class FakePostResponse:
+            status_code = 200
+
+            async def aread(self):
+                return b'data: {"type":"response.completed","response":{}}'
+
+        class FakeStreamResponse:
+            status_code = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def aiter_lines(self):
+                yield 'data: {"type":"response.completed","response":{}}'
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def post(self, *args, **kwargs):
+                requested_headers.append(kwargs["headers"])
+                return FakePostResponse()
+
+            def stream(self, *args, **kwargs):
+                requested_headers.append(kwargs["headers"])
+                return FakeStreamResponse()
+
+        async def make_requests():
+            await provider._request_backend_once({"stream": True})
+            await provider._request_image_backend_once({"stream": True})
+
+        with patch("oauth_plug_openai_codex.provider.httpx.AsyncClient", FakeClient):
+            asyncio.run(make_requests())
+
+        self.assertEqual(
+            requested_headers,
+            [{"X-Shared-Headers": "yes"}, {"X-Shared-Headers": "yes"}],
+        )
+
+    def test_prepare_chat_payload_preserves_request_reasoning_controls(self):
+        provider = self._make_provider("/tmp")
+
+        payloads, _ = asyncio.run(
+            provider._prepare_chat_payload(
+                prompt="hello",
+                model="gpt-5.6-sol",
+                reasoning_effort="high",
+                reasoning={"summary": "auto"},
+            )
+        )
+
+        self.assertEqual(payloads["reasoning_effort"], "high")
+        self.assertEqual(payloads["reasoning"], {"summary": "auto"})
+
+    def test_query_applies_reasoning_priority_and_request_retry_count(self):
+        provider = self._make_provider("/tmp")
+        provider.provider_config["custom_extra_body"] = {
+            "reasoning_effort": "low",
+            "reasoning": {"effort": "medium", "summary": "detailed"},
+        }
+
+        _, calls, retries = self._run_query(
+            provider,
+            {
+                "model": "gpt-5.6-sol",
+                "messages": [],
+                "reasoning_effort": "high",
+                "reasoning": {"effort": "xhigh", "summary": "auto"},
+            },
+            request_max_retries=7,
+        )
+
+        self.assertEqual(
+            calls[0]["reasoning"],
+            {"effort": "xhigh", "summary": "auto"},
+        )
+        self.assertNotIn("reasoning_effort", calls[0])
+        self.assertEqual(retries, [("OpenAI OAuth", 7)])
+
+    def test_query_normalizes_off_and_legacy_max_reasoning_efforts(self):
+        provider = self._make_provider("/tmp")
+
+        _, off_calls, _ = self._run_query(
+            provider,
+            {"model": "gpt-5.6-sol", "messages": [], "reasoning_effort": "off"},
+        )
+        _, max_calls, _ = self._run_query(
+            provider,
+            {"model": "gpt-5.5", "messages": [], "reasoning_effort": "max"},
+        )
+
+        self.assertEqual(off_calls[0]["reasoning"]["effort"], "none")
+        self.assertEqual(max_calls[0]["reasoning"]["effort"], "xhigh")
+
+    def test_query_maps_gpt_5_3_codex_max_to_xhigh(self):
+        provider = self._make_provider("/tmp")
+
+        _, calls, _ = self._run_query(
+            provider,
+            {"model": "gpt-5.3-codex", "messages": [], "reasoning_effort": "max"},
+        )
+
+        self.assertEqual(calls[0]["reasoning"]["effort"], "xhigh")
+
+    def test_query_keeps_gpt_5_6_max_and_unknown_model_effort(self):
+        provider = self._make_provider("/tmp")
+
+        _, max_calls, _ = self._run_query(
+            provider,
+            {"model": "gpt-5.6-terra", "messages": [], "reasoning_effort": "max"},
+        )
+        _, unknown_calls, _ = self._run_query(
+            provider,
+            {"model": "gpt-future", "messages": [], "reasoning_effort": "novel"},
+        )
+
+        self.assertEqual(max_calls[0]["reasoning"]["effort"], "max")
+        self.assertEqual(unknown_calls[0]["reasoning"]["effort"], "novel")
+
+    def test_query_rejects_ultra_for_single_provider_request(self):
+        provider = self._make_provider("/tmp")
+
+        with self.assertRaisesRegex(ValueError, "ultra"):
+            self._run_query(
+                provider,
+                {
+                    "model": "gpt-5.6-sol",
+                    "messages": [],
+                    "reasoning_effort": "ultra",
+                },
+            )
 
     def test_generate_image_without_reference_builds_generate_payload(self):
         with TemporaryDirectory() as tmp:
@@ -359,7 +600,9 @@ class ProviderImageGenerationTests(unittest.TestCase):
                     )
                     return FakeStreamResponse()
 
-            with patch("oauth_plug_openai_codex.provider.httpx.AsyncClient", FakeClient):
+            with patch(
+                "oauth_plug_openai_codex.provider.httpx.AsyncClient", FakeClient
+            ):
                 results = asyncio.run(provider.generate_image("draw streamed image"))
 
             self.assertEqual(sent_requests[0]["method"], "POST")
@@ -468,7 +711,7 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
 
             async def external_plugin_call(context):
                 selected = context.get_provider_by_id(
-                    "oauth_plug_openai_codex_chat_completion/gpt-5.5"
+                    "oauth_plug_openai_codex_chat_completion/gpt-5.6-sol"
                 )
                 self.assertTrue(selected.capabilities["image_generate"])
                 self.assertTrue(selected.capabilities["image_edit"])
@@ -483,9 +726,11 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
 
             self.assertEqual(
                 context.requested_provider_id,
-                "oauth_plug_openai_codex_chat_completion/gpt-5.5",
+                "oauth_plug_openai_codex_chat_completion/gpt-5.6-sol",
             )
-            self.assertEqual(requested_payloads[0]["instructions"], "external plugin image")
+            self.assertEqual(
+                requested_payloads[0]["instructions"], "external plugin image"
+            )
             self.assertEqual(requested_payloads[0]["tools"][0]["action"], "edit")
             self.assertEqual(
                 requested_payloads[0]["input"][0]["content"][1]["image_url"],

@@ -24,7 +24,7 @@ oauth_plug_openai_codex_chat_completion
 ## 使用方式
 
 1. 安装并启用插件。
-2. 在插件配置中填写代理和模型列表，例如 `http://127.0.0.1:7890`、`gpt-5.5`。配置页主要用于查看状态、填写参数和检查最近生成的授权信息。
+2. 在插件配置中填写代理和模型列表，例如 `http://127.0.0.1:7890`、`gpt-5.6-sol`。配置页主要用于查看状态、填写参数和检查最近生成的授权信息。
 3. 管理员发送 `codex_oauth_start` 获取授权地址。<img width="608" height="338" alt="image" src="https://github.com/user-attachments/assets/b912302b-844c-48a1-8121-9180ffb342f4" />
 4. 在浏览器完成 OpenAI 登录后，复制完整回调 URL。<img width="541" height="703" alt="03d9c240acb998532c0bebda02587589" src="https://github.com/user-attachments/assets/c99b0672-70cb-4bfd-b7a9-ed834151641a" /><img width="1059" height="82" alt="f6ae88f15eaeb11d23d27ed88dd7a369" src="https://github.com/user-attachments/assets/f22402f6-4d16-4a97-b9da-f02cc7e9c2f3" />
 5. 管理员发送 `codex_oauth_complete <完整回调地址>` 完成绑定。<img width="608" height="177" alt="image" src="https://github.com/user-attachments/assets/81ba9677-f6fe-46aa-9727-625d3d47dc70" />
@@ -37,9 +37,9 @@ oauth_plug_openai_codex_chat_completion
 模型列表按行填写，用于提供商配置页面的标题（实际以提供商配置页面为准）。默认示例：
 
 ```text
-gpt-5.5
-gpt-5.4
-gpt-5.3-codex
+gpt-5.6-sol
+gpt-5.6-terra
+gpt-5.6-luna
 ```
 
 ## 插件接口
@@ -76,7 +76,7 @@ if reference_images and not capabilities.get("image_edit"):
 
 images = await provider.generate_image(
     prompt="根据参考图重绘背景",
-    model="gpt-5.5",
+    model="gpt-5.6-sol",
     size="1024x1024",
     n=1,
     reference_images=reference_images,

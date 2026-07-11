@@ -2,6 +2,12 @@
 
 ## 未发布
 
+- 默认模型组更新为 GPT-5.6 Sol、Terra 和 Luna，并保留旧模型及自定义模型配置兼容。
+- 为 AstrBot 4.24 补充核心请求重试模块缺失时的兼容分支。
+- 同步 `reasoning_effort` 规范化与覆盖优先级，拒绝单次 Provider 请求使用 `ultra`，旧模型的 `max` 转换为 `xhigh`。
+- 统一 Provider 与连接测试的 Codex 请求头，携带 `version=0.144.0`、`User-Agent=codex_cli_rs/0.144.0` 和 JWT residency。
+- 保持文生图、参考图编辑和 SSE 增量解析兼容，并补充相关回归测试。
+
 - 补充 OAuth 生图扩展回归测试，覆盖 SSE 输出回填、重复输出去重、401/403 后刷新重试和其他插件带参考图调用。
 - 同步 AstrBot 本体整合版 OAuth 生图专用 SSE 请求分支，供 `generate_image()` 增量读取图片生成事件。
 - 同步 AstrBot 本体整合版 OAuth 图像能力，支持 `generate_image()` 传入参考图并自动使用图片编辑请求。

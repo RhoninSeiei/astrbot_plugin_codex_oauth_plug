@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import unittest
 from unittest.mock import patch
 
@@ -7,6 +9,14 @@ from oauth_plug_openai_codex.service import (
     PROVIDER_TYPE,
     OpenAICodexOAuthService,
 )
+
+
+def _encode_test_jwt(claims):
+    def encode_part(value):
+        raw = json.dumps(value, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{encode_part({'alg': 'none'})}.{encode_part(claims)}.signature"
 
 
 class FakeConfig(dict):
@@ -22,6 +32,16 @@ class FakeConfig(dict):
 
 
 class ServiceTests(unittest.TestCase):
+    def test_service_defaults_to_all_gpt_5_6_models(self):
+        service = OpenAICodexOAuthService({})
+
+        models = service.get_models()
+        self.assertEqual(
+            models,
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+        )
+        self.assertEqual(service.get_default_model(), "gpt-5.6-sol")
+
     def test_service_builds_provider_config_with_oauth_plug_prefix(self):
         config = FakeConfig()
         config.update(
@@ -94,7 +114,9 @@ class ServiceTests(unittest.TestCase):
 
         provider_config = service.build_provider_config({"id": "demo/gpt-5.5"})
 
-        self.assertEqual(provider_config["api_base"], "https://chatgpt.com/backend-api/codex")
+        self.assertEqual(
+            provider_config["api_base"], "https://chatgpt.com/backend-api/codex"
+        )
         self.assertEqual(provider_config["proxy"], "http://127.0.0.1:7890")
         self.assertEqual(provider_config["model"], "gpt-5.5")
         self.assertEqual(provider_config["oauth_access_token"], "access")
@@ -160,18 +182,27 @@ class ServiceTests(unittest.TestCase):
                 "models": "gpt-5.5\ngpt-5.4",
             },
             "oauth": {
-                "oauth_access_token": "access-token",
+                "oauth_access_token": _encode_test_jwt(
+                    {
+                        "https://api.openai.com/auth": {
+                            "chatgpt_compute_residency": "service-region",
+                        }
+                    }
+                ),
                 "oauth_account_id": "account-id",
             },
         }
         service = OpenAICodexOAuthService(config)
 
-        with patch(
-            "oauth_plug_openai_codex.service.httpx.AsyncClient",
-            FakeClient,
-        ), patch(
-            "oauth_plug_openai_codex.service.time.perf_counter",
-            side_effect=[10.0, 10.321],
+        with (
+            patch(
+                "oauth_plug_openai_codex.service.httpx.AsyncClient",
+                FakeClient,
+            ),
+            patch(
+                "oauth_plug_openai_codex.service.time.perf_counter",
+                side_effect=[10.0, 10.321],
+            ),
         ):
             result = asyncio.run(service.test_connection())
 
@@ -181,7 +212,13 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["proxy"], "http://127.0.0.1:7890")
         post = calls[1]
         self.assertEqual(post[1], "https://chatgpt.com/backend-api/codex/responses")
-        self.assertEqual(post[2]["Authorization"], "Bearer access-token")
+        self.assertTrue(post[2]["Authorization"].startswith("Bearer "))
         self.assertEqual(post[2]["chatgpt-account-id"], "account-id")
+        self.assertEqual(post[2]["version"], "0.144.0")
+        self.assertEqual(post[2]["User-Agent"], "codex_cli_rs/0.144.0")
+        self.assertEqual(
+            post[2]["x-openai-internal-codex-residency"],
+            "service-region",
+        )
         self.assertEqual(post[3]["model"], "gpt-5.5")
         self.assertEqual(post[3]["instructions"], "请只回复 ok")

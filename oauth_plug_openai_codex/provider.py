@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import inspect
 import json
 import mimetypes
 import uuid
@@ -13,14 +12,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
 from astrbot import logger
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.provider.entities import LLMResponse, TokenUsage
-from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
+from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
+from .headers import build_codex_backend_headers
 from .oauth import refresh_access_token
+from .retry_compat import retry_provider_request
 from .service import OAUTH_PLACEHOLDER_KEY, get_service
 
 
@@ -41,6 +41,91 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
         "reasoning": True,
         "image_generate": True,
         "image_edit": True,
+    }
+    model_capabilities = {
+        "gpt-5.6-sol": {
+            "default_reasoning_effort": "low",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ),
+        },
+        "gpt-5.6-terra": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ),
+        },
+        "gpt-5.6-luna": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ),
+        },
+        "gpt-5.5": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+            ),
+        },
+        "gpt-5.4": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+            ),
+        },
+        "gpt-5.4-mini": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+            ),
+        },
+        "gpt-5.3-codex-spark": {
+            "default_reasoning_effort": "high",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+            ),
+        },
+        "gpt-5.3-codex": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+            ),
+        },
     }
 
     def __init__(self, provider_config, provider_settings) -> None:
@@ -76,7 +161,21 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
         if service is not None:
             return service.get_models()
         configured_model = str(self.provider_config.get("model") or "").strip()
-        return [configured_model] if configured_model else []
+        return [configured_model] if configured_model else list(self.model_capabilities)
+
+    async def _prepare_chat_payload(
+        self,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        payloads, context_query = await super()._prepare_chat_payload(
+            *args,
+            **kwargs,
+        )
+        for key in ("reasoning_effort", "reasoning"):
+            if kwargs.get(key) is not None:
+                payloads[key] = kwargs[key]
+        return payloads, context_query
 
     def _parse_oauth_expires_at(self) -> datetime | None:
         value = (self.provider_config.get("oauth_expires_at") or "").strip()
@@ -109,14 +208,12 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
         if refresh_token:
             self.provider_config["oauth_refresh_token"] = refresh_token
         self.provider_config["oauth_expires_at"] = str(token.get("expires_at") or "")
-        self.provider_config["oauth_account_email"] = (
-            str(token.get("email") or "")
-            or self.provider_config.get("oauth_account_email", "")
-        )
-        self.provider_config["oauth_account_id"] = (
-            str(token.get("account_id") or "")
-            or self.provider_config.get("oauth_account_id", "")
-        )
+        self.provider_config["oauth_account_email"] = str(
+            token.get("email") or ""
+        ) or self.provider_config.get("oauth_account_email", "")
+        self.provider_config["oauth_account_id"] = str(
+            token.get("account_id") or ""
+        ) or self.provider_config.get("oauth_account_id", "")
         self.account_id = self.provider_config.get("oauth_account_id", "")
         self.api_keys = [OAUTH_PLACEHOLDER_KEY]
         self.chosen_api_key = ""
@@ -149,16 +246,14 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
                 return
             await self._refresh_oauth_token()
 
-    async def _request_backend_once(
-        self,
-        payload: dict[str, Any],
-    ) -> tuple[int, str]:
+    def _build_backend_headers(self) -> dict[str, str]:
         service = get_service()
         if service is not None:
             self.provider_config = service.build_provider_config(self.provider_config)
-            self.base_url = (self.provider_config.get("api_base") or self.base_url).rstrip(
-                "/"
-            )
+            self.base_url = (
+                self.provider_config.get("api_base") or self.base_url
+            ).rstrip("/")
+
         access_token = (self.provider_config.get("oauth_access_token") or "").strip()
         account_id = (
             self.provider_config.get("oauth_account_id") or self.account_id or ""
@@ -170,19 +265,18 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
                 "当前 OAuth_plug 配置缺少 chatgpt_account_id，请重新绑定或导入完整 JSON 凭据"
             )
 
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "chatgpt-account-id": account_id,
-            "OpenAI-Beta": "responses=experimental",
-            "originator": "codex_cli_rs",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        }
         custom_headers = self.provider_config.get("custom_headers")
-        if isinstance(custom_headers, dict):
-            for key, value in custom_headers.items():
-                headers[str(key)] = str(value)
+        return build_codex_backend_headers(
+            access_token,
+            account_id,
+            custom_headers=custom_headers if isinstance(custom_headers, dict) else None,
+        )
 
+    async def _request_backend_once(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[int, str]:
+        headers = self._build_backend_headers()
         async with httpx.AsyncClient(
             proxy=self.provider_config.get("proxy") or None,
             timeout=self.timeout,
@@ -215,36 +309,7 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
         self,
         payload: dict[str, Any],
     ) -> tuple[int, str]:
-        service = get_service()
-        if service is not None:
-            self.provider_config = service.build_provider_config(self.provider_config)
-            self.base_url = (self.provider_config.get("api_base") or self.base_url).rstrip(
-                "/"
-            )
-        access_token = (self.provider_config.get("oauth_access_token") or "").strip()
-        account_id = (
-            self.provider_config.get("oauth_account_id") or self.account_id or ""
-        ).strip()
-        if not access_token:
-            raise Exception("当前 OAuth_plug 配置尚未绑定 access token")
-        if not account_id:
-            raise Exception(
-                "当前 OAuth_plug 配置缺少 chatgpt_account_id，请重新绑定或导入完整 JSON 凭据"
-            )
-
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "chatgpt-account-id": account_id,
-            "OpenAI-Beta": "responses=experimental",
-            "originator": "codex_cli_rs",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        }
-        custom_headers = self.provider_config.get("custom_headers")
-        if isinstance(custom_headers, dict):
-            for key, value in custom_headers.items():
-                headers[str(key)] = str(value)
-
+        headers = self._build_backend_headers()
         text_parts: list[str] = []
         async with httpx.AsyncClient(
             proxy=self.provider_config.get("proxy") or None,
@@ -678,7 +743,13 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
             llm_response.usage = usage
         return llm_response
 
-    async def _query(self, payloads: dict, tools) -> LLMResponse:
+    async def _query(
+        self,
+        payloads: dict,
+        tools,
+        *,
+        request_max_retries: int | None = None,
+    ) -> LLMResponse:
         instructions, backend_input = self._convert_messages_to_backend_input(
             payloads.get("messages", []) or []
         )
@@ -701,9 +772,58 @@ class ProviderOAuthPlugOpenAICodex(ProviderOpenAIOfficial):
                 if key in {"model", "input", "instructions"}:
                     continue
                 params[key] = value
+
+        reasoning_value = params.get("reasoning")
+        if reasoning_value is not None and not isinstance(reasoning_value, dict):
+            raise ValueError("reasoning 必须是对象。")
+        reasoning = dict(reasoning_value or {})
+
+        configured_effort = params.pop("reasoning_effort", None)
+        if configured_effort is not None and "effort" not in reasoning:
+            reasoning["effort"] = configured_effort
+
+        request_effort = payloads.get("reasoning_effort")
+        if request_effort is not None:
+            reasoning["effort"] = request_effort
+        request_reasoning = payloads.get("reasoning")
+        if request_reasoning is not None:
+            if not isinstance(request_reasoning, dict):
+                raise ValueError("reasoning 必须是对象。")
+            reasoning.update(request_reasoning)
+
+        if "effort" in reasoning:
+            effort = str(reasoning["effort"] or "").strip().lower()
+            if effort == "off":
+                effort = "none"
+            if effort == "ultra":
+                raise ValueError(
+                    "reasoning_effort=ultra 需要多代理调度，不能作为单次 Provider 请求发送。"
+                )
+            model = str(params["model"] or "").strip().lower()
+            capability = self.model_capabilities.get(model)
+            if capability:
+                supported = capability["supported_reasoning_efforts"]
+                if effort == "max" and effort not in supported and "xhigh" in supported:
+                    effort = "xhigh"
+                elif effort not in supported:
+                    supported_text = ", ".join(supported)
+                    raise ValueError(
+                        f"模型 {model} 不支持 reasoning_effort={effort}；"
+                        f"可用值：{supported_text}。"
+                    )
+            reasoning["effort"] = effort
+
+        if reasoning:
+            params["reasoning"] = reasoning
+        else:
+            params.pop("reasoning", None)
         params.pop("max_output_tokens", None)
         params.pop("temperature", None)
-        response = await self._request_backend(params)
+        response = await retry_provider_request(
+            "OpenAI OAuth",
+            lambda: self._request_backend(params),
+            max_attempts=request_max_retries,
+        )
         return await self._parse_responses_completion(response, tools)
 
     async def generate_image(

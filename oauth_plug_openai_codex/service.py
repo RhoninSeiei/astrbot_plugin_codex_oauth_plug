@@ -6,13 +6,18 @@ from typing import Any
 
 import httpx
 
+from .headers import build_codex_backend_headers
 from .oauth import create_pkce_flow, exchange_authorization_code, refresh_access_token
 
 PROVIDER_TYPE = "oauth_plug_openai_codex_chat_completion"
 OAUTH_PLACEHOLDER_KEY = "__oauth_plug_openai_codex__"
 DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
-DEFAULT_MODEL = "gpt-5.5"
-DEFAULT_MODELS = (DEFAULT_MODEL,)
+DEFAULT_MODEL = "gpt-5.6-sol"
+DEFAULT_MODELS = (
+    DEFAULT_MODEL,
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+)
 
 _SERVICE: OpenAICodexOAuthService | None = None
 
@@ -45,14 +50,14 @@ class OpenAICodexOAuthService:
         return str(self._get_config_value("proxy", "runtime")).strip()
 
     def get_base_url(self) -> str:
-        return str(
-            self._get_config_value("base_url", "runtime", DEFAULT_BASE_URL)
-        ).strip().rstrip("/")
+        return (
+            str(self._get_config_value("base_url", "runtime", DEFAULT_BASE_URL))
+            .strip()
+            .rstrip("/")
+        )
 
     def _get_legacy_default_model(self) -> str:
-        return str(
-            self._get_config_value("default_model", "runtime", DEFAULT_MODEL)
-        ).strip()
+        return str(self._get_config_value("default_model", "runtime", "")).strip()
 
     def get_models(self) -> list[str]:
         raw_models = self._get_config_value("models", "runtime", "")
@@ -228,14 +233,12 @@ class OpenAICodexOAuthService:
             "stream": True,
             "store": False,
         }
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "chatgpt-account-id": account_id,
-            "OpenAI-Beta": "responses=experimental",
-            "originator": "codex_cli_rs",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-        }
+        custom_headers = self._get_config_value("custom_headers", "runtime", {})
+        headers = build_codex_backend_headers(
+            access_token,
+            account_id,
+            custom_headers=custom_headers if isinstance(custom_headers, dict) else None,
+        )
         async with httpx.AsyncClient(
             proxy=self.get_proxy() or None,
             timeout=30.0,
@@ -264,9 +267,7 @@ class OpenAICodexOAuthService:
                 continue
             if not isinstance(event, dict):
                 continue
-            if event.get("type") == "response.output_text.delta" and event.get(
-                "delta"
-            ):
+            if event.get("type") == "response.output_text.delta" and event.get("delta"):
                 output_text_parts.append(str(event["delta"]))
             if event.get("type") == "response.completed":
                 response = event.get("response")
@@ -274,8 +275,7 @@ class OpenAICodexOAuthService:
                     return {
                         "response_id": str(response.get("id") or ""),
                         "output_text": str(
-                            response.get("output_text")
-                            or "".join(output_text_parts)
+                            response.get("output_text") or "".join(output_text_parts)
                         ),
                     }
         stripped = text.strip()
@@ -290,8 +290,7 @@ class OpenAICodexOAuthService:
                     return {
                         "response_id": str(response.get("id") or ""),
                         "output_text": str(
-                            response.get("output_text")
-                            or "".join(output_text_parts)
+                            response.get("output_text") or "".join(output_text_parts)
                         ),
                     }
         return {"response_id": "", "output_text": "".join(output_text_parts)}
