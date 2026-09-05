@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import time
+import asyncio
+from weakref import WeakSet
 from typing import Any
 
 import httpx
 
 from .headers import build_codex_backend_headers
 from .oauth import create_pkce_flow, exchange_authorization_code, refresh_access_token
+from .openai_oauth_shared_state import OpenAIOAuthSharedState, OPENAI_OAUTH_CREDENTIAL_FIELDS
 
 PROVIDER_TYPE = "oauth_plug_openai_codex_chat_completion"
 OAUTH_PLACEHOLDER_KEY = "__oauth_plug_openai_codex__"
@@ -15,6 +18,7 @@ DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_MODELS = (
     DEFAULT_MODEL,
+    "gpt-6-astra",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
@@ -26,6 +30,33 @@ class OpenAICodexOAuthService:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self._flows: dict[str, dict[str, Any]] = {}
+        self._authorization_epoch = 0
+        self._closed = False
+        self._providers = WeakSet()
+        self.shared_state = OpenAIOAuthSharedState("oauth_plug_openai_codex", {
+            key: self._get_config_value(key, "oauth")
+            for key in OPENAI_OAUTH_CREDENTIAL_FIELDS
+        })
+
+    def register_provider(self, provider) -> None:
+        self._require_open()
+        self._providers.add(provider)
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("OAuth 插件服务已关闭")
+
+    async def close(self) -> None:
+        self._closed = True
+        self._authorization_epoch += 1
+        self._flows.clear()
+        self.shared_state.replace({})
+        providers = list(self._providers)
+        self._providers.clear()
+        results = await asyncio.gather(*(p.terminate() for p in providers), return_exceptions=True)
+        failures = [result for result in results if isinstance(result, BaseException)]
+        if failures:
+            raise RuntimeError("部分 OAuth 提供商资源清理失败") from failures[0]
 
     def _section(self, name: str) -> dict[str, Any]:
         value = self.config.get(name)
@@ -94,9 +125,12 @@ class OpenAICodexOAuthService:
         return str(self._get_config_value("authorization_input", "oauth")).strip()
 
     def set_oauth_config_value(self, key: str, value: Any) -> None:
+        self._require_open()
         self._set_config_value(key, value, "oauth")
+        self.shared_state.apply({key: value})
 
     def build_provider_config(self, provider_config: dict[str, Any]) -> dict[str, Any]:
+        self._require_open()
         merged = dict(provider_config)
         merged["type"] = PROVIDER_TYPE
         merged["provider"] = "openai"
@@ -111,24 +145,38 @@ class OpenAICodexOAuthService:
             "oauth_expires_at",
             "oauth_account_email",
             "oauth_account_id",
-            "oauth_refresh_skew_seconds",
         ):
             value = self._get_config_value(key, "oauth")
             if value not in (None, ""):
                 merged[key] = value
+        merged["oauth_shared_state"] = self.shared_state
+        merged["oauth_refresh_skew_seconds"] = self._get_config_value(
+            "oauth_refresh_skew_seconds", "runtime", 300
+        )
+        for key, default in (
+            ("oauth_web_search", "disabled"),
+            ("oauth_web_search_domains", []),
+            ("oauth_audio_transcription", False),
+            ("oauth_transcription_model", "gpt-4o-transcribe"),
+        ):
+            merged.setdefault(key, self._get_config_value(key, "advanced", default))
         image_dir = self._get_config_value("generated_image_dir", "advanced")
         if image_dir:
             merged["generated_image_dir"] = image_dir
         return merged
 
     def create_flow(self, flow_id: str = "default") -> dict[str, str]:
+        self._require_open()
         flow = create_pkce_flow()
         self._flows[flow_id] = flow
         return flow
 
     async def complete_flow(self, auth_input: str, flow_id: str = "default") -> dict:
+        self._require_open()
         from .oauth import parse_authorization_input, parse_oauth_credential_json
 
+        version = self.shared_state.version
+        epoch = self._authorization_epoch
         token = parse_oauth_credential_json(auth_input)
         if token is None:
             flow = self._flows.get(flow_id)
@@ -146,55 +194,76 @@ class OpenAICodexOAuthService:
                 str(flow.get("verifier") or ""),
                 self.get_proxy(),
             )
-        await self.persist_token(token)
+        if self.shared_state.version != version or self._authorization_epoch != epoch:
+            raise ValueError("授权状态在请求期间发生变化，请重新开始授权。")
+        await self.persist_token(token, replace=True)
         self._flows.pop(flow_id, None)
         return token
 
-    async def refresh(self) -> dict[str, Any]:
-        refresh_token_value = str(
-            self._get_config_value("oauth_refresh_token", "oauth")
-        ).strip()
-        if not refresh_token_value:
-            raise ValueError("当前配置没有可用的 refresh token")
-        token = await refresh_access_token(refresh_token_value, self.get_proxy())
-        await self.persist_token(token)
-        return token
+    async def refresh(self, attempted_version: int | None = None) -> dict[str, Any]:
+        self._require_open()
+        version = self.shared_state.version if attempted_version is None else attempted_version
+        async with self.shared_state.refresh_lock:
+            self._require_open()
+            if self.shared_state.version != version:
+                return self._current_token()
+            refresh_token_value = str(self.shared_state.snapshot().get("oauth_refresh_token") or "").strip()
+            if not refresh_token_value:
+                raise ValueError("当前配置没有可用的 refresh token")
+            token = await refresh_access_token(refresh_token_value, self.get_proxy())
+            if self.shared_state.version != version:
+                return self._current_token()
+            await self.persist_token(token)
+            return token
 
-    async def persist_token(self, token: dict[str, Any]) -> None:
+    def _current_token(self) -> dict[str, Any]:
+        state = self.shared_state.snapshot()
+        return {name: state.get(key, "") for name, key in (
+            ("access_token", "oauth_access_token"), ("refresh_token", "oauth_refresh_token"),
+            ("expires_at", "oauth_expires_at"), ("account_id", "oauth_account_id"),
+            ("email", "oauth_account_email"),
+        )}
+
+    async def persist_token(self, token: dict[str, Any], *, replace: bool = False) -> None:
+        self._require_open()
+        previous = {} if replace else self._current_token()
         updates = {
             "auth_mode": "openai_oauth",
             "oauth_provider": "openai",
             "oauth_access_token": str(token.get("access_token") or ""),
-            "oauth_refresh_token": str(token.get("refresh_token") or ""),
+            "oauth_refresh_token": str(token.get("refresh_token") or previous.get("refresh_token") or ""),
             "oauth_expires_at": str(token.get("expires_at") or ""),
             "oauth_account_email": str(
                 token.get("email")
-                or self._get_config_value("oauth_account_email", "oauth")
+                or previous.get("email")
                 or ""
             ),
             "oauth_account_id": str(
                 token.get("account_id")
-                or self._get_config_value("oauth_account_id", "oauth")
+                or previous.get("account_id")
                 or ""
             ),
         }
         for key, value in updates.items():
             self._set_config_value(key, value, "oauth")
+        self.shared_state.apply(updates)
         save_config = getattr(self.config, "save_config", None)
         if callable(save_config):
             save_config(dict(self.config))
 
     async def test_connection(self, model: str | None = None) -> dict[str, Any]:
+        self._require_open()
         target_model = (model or self.get_default_model()).strip()
         if not target_model:
             raise ValueError("缺少用于测试的模型 ID")
 
         started_at = time.perf_counter()
+        attempted_version = self.shared_state.version
         status_code, text = await self._request_test_backend_once(target_model)
         if status_code in {401, 403} and self._get_config_value(
             "oauth_refresh_token", "oauth"
         ):
-            await self.refresh()
+            await self.refresh(attempted_version)
             status_code, text = await self._request_test_backend_once(target_model)
 
         latency_ms = max(0, round((time.perf_counter() - started_at) * 1000))
@@ -267,33 +336,39 @@ class OpenAICodexOAuthService:
                 continue
             if not isinstance(event, dict):
                 continue
+            if event.get("type") in {"error", "response.failed", "response.incomplete"}:
+                raise ValueError("Codex backend 测试未完成，服务返回错误事件。")
             if event.get("type") == "response.output_text.delta" and event.get("delta"):
                 output_text_parts.append(str(event["delta"]))
             if event.get("type") == "response.completed":
                 response = event.get("response")
                 if isinstance(response, dict):
-                    return {
-                        "response_id": str(response.get("id") or ""),
-                        "output_text": str(
-                            response.get("output_text") or "".join(output_text_parts)
-                        ),
-                    }
+                    return self._completed_test_result(response, "".join(output_text_parts))
         stripped = text.strip()
         if stripped.startswith("{"):
             try:
                 data = json.loads(stripped)
-            except Exception:
-                return {"response_id": "", "output_text": "".join(output_text_parts)}
+            except ValueError as exc:
+                raise ValueError("Codex backend 测试返回了无效 JSON。") from exc
             if isinstance(data, dict):
                 response = data.get("response") if data.get("response") else data
-                if isinstance(response, dict):
-                    return {
-                        "response_id": str(response.get("id") or ""),
-                        "output_text": str(
-                            response.get("output_text") or "".join(output_text_parts)
-                        ),
-                    }
-        return {"response_id": "", "output_text": "".join(output_text_parts)}
+                if isinstance(response, dict) and (
+                    data.get("type") == "response.completed" or response.get("status") == "completed"
+                ):
+                    return self._completed_test_result(response, "".join(output_text_parts))
+        raise ValueError("Codex backend 测试未完成：缺少 response.completed。")
+
+    def _completed_test_result(self, response: dict, delta_text: str) -> dict[str, str]:
+        if response.get("error") or response.get("status", "completed") != "completed" or not response.get("id"):
+            raise ValueError("Codex backend 测试返回的完成响应无效。")
+        text = str(response.get("output_text") or delta_text)
+        if not text:
+            text = "".join(
+                str(part.get("text") or "")
+                for item in response.get("output", []) if isinstance(item, dict)
+                for part in item.get("content", []) if isinstance(part, dict) and part.get("type") == "output_text"
+            )
+        return {"response_id": str(response["id"]), "output_text": text}
 
     def _format_backend_error(self, status_code: int, text: str) -> str:
         body = text.strip()
@@ -307,6 +382,8 @@ class OpenAICodexOAuthService:
         return f"Codex backend 测试失败: status={status_code}, body={body}"
 
     def disconnect(self) -> None:
+        self._require_open()
+        self._authorization_epoch += 1
         updates = {
             "auth_mode": "manual",
             "oauth_provider": "",
@@ -320,6 +397,8 @@ class OpenAICodexOAuthService:
             self.config["oauth"].update(updates)
         else:
             self.config.update(updates)
+        self.shared_state.replace(updates)
+        self._flows.clear()
         save_config = getattr(self.config, "save_config", None)
         if callable(save_config):
             save_config(dict(self.config))

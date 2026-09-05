@@ -42,19 +42,25 @@ def _install_fake_astrbot_runtime():
     entities_module = types.ModuleType("astrbot.core.provider.entities")
 
     class LLMResponse:
-        def __init__(self, role):
+        def __init__(self, role, **kwargs):
             self.role = role
             self.result_chain = None
-            self.reasoning_content = ""
-            self.tools_call_args = []
-            self.tools_call_name = []
-            self.tools_call_ids = []
+            self._completion_text = kwargs.pop("completion_text", None)
+            self.reasoning_content = kwargs.pop("reasoning_content", "")
+            self.tools_call_args = kwargs.pop("tools_call_args", [])
+            self.tools_call_name = kwargs.pop("tools_call_name", [])
+            self.tools_call_ids = kwargs.pop("tools_call_ids", [])
+            self.is_chunk = kwargs.pop("is_chunk", False)
             self.raw_completion = None
             self.id = ""
             self.usage = None
+            for key, value in kwargs.items():
+                setattr(self, key, value)
 
         @property
         def completion_text(self):
+            if self._completion_text is not None:
+                return self._completion_text
             if self.result_chain and self.result_chain.messages:
                 return "".join(self.result_chain.messages)
             return None
@@ -64,6 +70,13 @@ def _install_fake_astrbot_runtime():
             self.input_other = input_other
             self.input_cached = input_cached
             self.output = output
+
+        def __add__(self, other):
+            return TokenUsage(
+                self.input_other + other.input_other,
+                self.input_cached + other.input_cached,
+                self.output + other.output,
+            )
 
     entities_module.LLMResponse = LLMResponse
     entities_module.TokenUsage = TokenUsage
@@ -76,11 +89,47 @@ def _install_fake_astrbot_runtime():
     )
 
     class ProviderOpenAIOfficial:
+        def __init__(self, provider_config, provider_settings):
+            self.provider_config = dict(provider_config)
+            self.provider_settings = provider_settings
+            self.api_keys = list(provider_config.get("key") or [])
+            self.chosen_api_key = ""
+            self.timeout = float(provider_config.get("timeout") or 30)
+            self.client = types.SimpleNamespace(
+                api_key=self.api_keys[0] if self.api_keys else "",
+                base_url=types.SimpleNamespace(host="chatgpt.example"),
+            )
+
         def get_model(self):
             return getattr(self, "provider_config", {}).get("model", "")
 
         async def _prepare_chat_payload(self, *args, **kwargs):
             return {"messages": [], "model": kwargs.get("model", "")}, []
+
+        async def text_chat(
+            self,
+            prompt=None,
+            func_tool=None,
+            model=None,
+            request_max_retries=None,
+            retry_rate_limits=None,
+            oauth_web_search=None,
+            **kwargs,
+        ):
+            payloads, _ = await self._prepare_chat_payload(
+                prompt,
+                model=model,
+                oauth_web_search=oauth_web_search,
+                retry_rate_limits=retry_rate_limits,
+                **kwargs,
+            )
+            return await self._query(
+                payloads,
+                func_tool,
+                request_max_retries=request_max_retries,
+                retry_rate_limits=retry_rate_limits,
+                oauth_web_search=oauth_web_search,
+            )
 
     openai_source_module.ProviderOpenAIOfficial = ProviderOpenAIOfficial
 
@@ -129,6 +178,19 @@ def _encode_test_jwt(claims):
 
 
 class ProviderImageGenerationTests(unittest.TestCase):
+    def _make_initialized_provider(self):
+        return ProviderOAuthPlugOpenAICodex(
+            provider_config={
+                "id": "test-oauth-plug",
+                "type": "oauth_plug_openai_codex_chat_completion",
+                "model": "gpt-6-astra",
+                "oauth_access_token": "access-token",
+                "oauth_refresh_token": "refresh-token",
+                "oauth_account_id": "account-id",
+            },
+            provider_settings={},
+        )
+
     def _make_provider(self, generated_image_dir: str):
         provider = ProviderOAuthPlugOpenAICodex.__new__(ProviderOAuthPlugOpenAICodex)
         provider.provider_config = {
@@ -177,12 +239,12 @@ class ProviderImageGenerationTests(unittest.TestCase):
             )
         return result, calls, retries
 
-    def test_provider_advertises_gpt_5_6_models(self):
+    def test_provider_advertises_gpt_6_and_gpt_5_6_models(self):
         capabilities = ProviderOAuthPlugOpenAICodex.model_capabilities
 
         self.assertEqual(
             list(capabilities)[:3],
-            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"],
         )
         self.assertEqual(
             capabilities["gpt-5.6-sol"]["default_reasoning_effort"],
@@ -206,8 +268,8 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
         headers = provider._build_backend_headers()
 
-        self.assertEqual(headers["version"], "0.144.0")
-        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.144.0")
+        self.assertEqual(headers["version"], "0.153.4")
+        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.153.4")
         self.assertEqual(headers["x-openai-internal-codex-residency"], "us")
         self.assertEqual(headers["X-Plugin-Test"], "enabled")
 
@@ -358,6 +420,220 @@ class ProviderImageGenerationTests(unittest.TestCase):
                     "reasoning_effort": "ultra",
                 },
             )
+
+    def test_gpt_6_request_strips_unsupported_sampling_and_adds_live_search(self):
+        provider = self._make_provider("/tmp")
+        provider.provider_config.update(
+            {
+                "oauth_web_search": "live",
+                "oauth_web_search_domains": ["example.com", "docs.example.com"],
+                "custom_extra_body": {
+                    "top_p": 0.8,
+                    "top_logprobs": 3,
+                    "include": ["message.output_text.logprobs", "reasoning.encrypted_content"],
+                },
+            }
+        )
+
+        params = provider._build_responses_params(
+            {"model": "gpt-6-astra", "messages": []},
+            None,
+        )
+
+        self.assertNotIn("top_p", params)
+        self.assertNotIn("top_logprobs", params)
+        self.assertEqual(params["include"], ["reasoning.encrypted_content"])
+        self.assertEqual(
+            params["tools"],
+            [
+                {
+                    "type": "web_search",
+                    "external_web_access": True,
+                    "filters": {
+                        "allowed_domains": ["example.com", "docs.example.com"]
+                    },
+                }
+            ],
+        )
+
+    def test_model_discovery_uses_plugin_model_list(self):
+        from oauth_plug_openai_codex.service import OpenAICodexOAuthService
+        provider = self._make_provider("/tmp")
+        service = OpenAICodexOAuthService({"runtime": {"models": "gpt-6-astra\ncustom-model"}})
+        with patch("oauth_plug_openai_codex.provider.get_service", return_value=service):
+            self.assertEqual(asyncio.run(provider.get_models()), ["gpt-6-astra", "custom-model"])
+
+    def test_stream_event_yields_incremental_text(self):
+        provider = self._make_provider("/tmp")
+        output_text_parts = []
+
+        chunk, completed = provider._apply_stream_event(
+            {"type": "response.output_text.delta", "delta": "hello"},
+            output_text_parts,
+            [],
+            {},
+        )
+
+        self.assertIsNone(completed)
+        self.assertTrue(chunk.is_chunk)
+        self.assertEqual(chunk.completion_text, "hello")
+        self.assertEqual(output_text_parts, ["hello"])
+
+    def test_query_stream_yields_delta_then_final_response(self):
+        provider = self._make_provider("/tmp")
+
+        async def fake_events(_params):
+            yield {"type": "response.output_text.delta", "delta": "hel"}
+            yield {"type": "response.output_text.delta", "delta": "lo"}
+            yield {
+                "type": "response.completed",
+                "response": {"id": "resp_stream", "output": []},
+            }
+
+        provider._stream_backend_events = fake_events
+
+        async def collect():
+            return [
+                response
+                async for response in provider._query_stream(
+                    {"model": "gpt-6-astra", "messages": []},
+                    None,
+                )
+            ]
+
+        responses = asyncio.run(collect())
+
+        self.assertEqual([item.completion_text for item in responses], ["hel", "lo", "hello"])
+        self.assertEqual([item.is_chunk for item in responses], [True, True, False])
+        self.assertEqual(responses[-1].id, "resp_stream")
+
+    def test_text_chat_forwards_one_request_live_search_mode(self):
+        provider = self._make_initialized_provider()
+        provider.provider_config["oauth_web_search"] = "disabled"
+        requested = []
+
+        async def fake_request_backend(params):
+            requested.append(params)
+            return {"id": "resp_text", "output_text": "answer", "output": []}
+
+        provider._request_backend = fake_request_backend
+
+        response = asyncio.run(
+            provider.text_chat(
+                prompt="search this",
+                model="gpt-6-astra",
+                oauth_web_search="live",
+                retry_rate_limits=False,
+            )
+        )
+
+        self.assertEqual(response.completion_text, "answer")
+        self.assertEqual(
+            requested[0]["tools"],
+            [{"type": "web_search", "external_web_access": True}],
+        )
+
+    def test_text_chat_stream_forwards_one_request_cached_search_mode(self):
+        provider = self._make_initialized_provider()
+        provider.provider_config["oauth_web_search"] = "disabled"
+        requested = []
+
+        async def fake_events(params):
+            requested.append(params)
+            yield {"type": "response.output_text.delta", "delta": "streamed"}
+            yield {
+                "type": "response.completed",
+                "response": {"id": "resp_stream_high", "output": []},
+            }
+
+        provider._stream_backend_events = fake_events
+
+        async def collect():
+            return [
+                response
+                async for response in provider.text_chat_stream(
+                    prompt="search once",
+                    model="gpt-6-astra",
+                    oauth_web_search="cached",
+                )
+            ]
+
+        responses = asyncio.run(collect())
+
+        self.assertEqual(
+            requested[0]["tools"],
+            [{"type": "web_search", "external_web_access": False}],
+        )
+        self.assertEqual(responses[0].completion_text, "streamed")
+        self.assertTrue(responses[0].is_chunk)
+        self.assertFalse(responses[-1].is_chunk)
+
+    def test_extract_url_citations_deduplicates_valid_sources(self):
+        response = {
+            "output": [
+                {
+                    "content": [
+                        {
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "title": "Example",
+                                    "url": "https://example.com/page",
+                                },
+                                {
+                                    "type": "source",
+                                    "title": "Duplicate",
+                                    "url": "https://example.com/page",
+                                },
+                                {
+                                    "type": "url_citation",
+                                    "url": "javascript:alert(1)",
+                                },
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+
+        self.assertEqual(
+            ProviderOAuthPlugOpenAICodex._extract_url_citations(response),
+            [("Example", "https://example.com/page")],
+        )
+
+    def test_audio_requires_explicit_transcription_opt_in(self):
+        provider = self._make_provider("/tmp")
+
+        with self.assertRaisesRegex(ValueError, "oauth_audio_transcription"):
+            asyncio.run(provider._resolve_audio_part("audio.wav"))
+
+    def test_provider_stat_skips_unregistered_direct_instance_without_logging(self):
+        provider = self._make_provider("/tmp")
+        inserts = []
+        warnings = []
+        fake_db = types.SimpleNamespace(
+            insert_provider_stat=lambda **kwargs: inserts.append(kwargs)
+        )
+
+        with (
+            patch("oauth_plug_openai_codex.provider.db_helper", fake_db),
+            patch(
+                "oauth_plug_openai_codex.provider.logger.warning",
+                lambda *args, **kwargs: warnings.append((args, kwargs)),
+            ),
+        ):
+            asyncio.run(
+                provider._record_provider_stat(
+                    request_kind="image",
+                    status="completed",
+                    usage=None,
+                    start_time=1.0,
+                    end_time=2.0,
+                )
+            )
+
+        self.assertEqual(inserts, [])
+        self.assertEqual(warnings, [])
 
     def test_generate_image_without_reference_builds_generate_payload(self):
         with TemporaryDirectory() as tmp:

@@ -5,7 +5,7 @@ from typing import Any
 
 from .service import OAUTH_PLACEHOLDER_KEY, PROVIDER_TYPE
 
-PROVIDER_TEMPLATE_NAME = "OAuth_plug OpenAI Codex OAuth"
+PROVIDER_TEMPLATE_NAME = "Codex OAuth 插件 / OpenAI"
 
 DEFAULT_PROVIDER_CONFIG: dict[str, Any] = {
     "id": "oauth_plug_openai_codex",
@@ -17,6 +17,9 @@ DEFAULT_PROVIDER_CONFIG: dict[str, Any] = {
     "key": [OAUTH_PLACEHOLDER_KEY],
     "api_base": "https://chatgpt.com/backend-api/codex",
     "proxy": "",
+    "timeout": 120,
+    "custom_headers": {},
+    "custom_extra_body": {},
 }
 
 
@@ -47,9 +50,10 @@ def _remove_dashboard_provider_template() -> None:
     templates = _get_dashboard_provider_templates()
     if templates is None:
         return
-    template = templates.get(PROVIDER_TEMPLATE_NAME)
-    if isinstance(template, dict) and template.get("type") == PROVIDER_TYPE:
-        templates.pop(PROVIDER_TEMPLATE_NAME, None)
+    for name in (PROVIDER_TEMPLATE_NAME, "OAuth_plug OpenAI Codex OAuth"):
+        template = templates.get(name)
+        if isinstance(template, dict) and template.get("type") == PROVIDER_TYPE:
+            templates.pop(name, None)
 
 
 def register_provider_adapter() -> None:
@@ -64,7 +68,7 @@ def register_provider_adapter() -> None:
         id="default",
         model=None,
         type=PROVIDER_TYPE,
-        desc="OAuth_plug OpenAI Codex OAuth 提供商适配器",
+        desc="Codex OAuth 插件：使用已绑定的 OpenAI 账号",
         provider_type=ProviderType.CHAT_COMPLETION,
         cls_type=ProviderOAuthPlugOpenAICodex,
         default_config_tmpl=copy.deepcopy(DEFAULT_PROVIDER_CONFIG),

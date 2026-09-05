@@ -1,134 +1,149 @@
-# astrbot_plugin_codex_oauth_plug
+# AstrBot Codex OAuth 插件
 
-> [!IMPORTANT]
-> 本插件提供 OpenAI Codex OAuth 账号态 Provider Source 能力。相关方法参考 OpenClaw 的 Codex OAuth 实现思路。OAuth 授权方式本身属于公开客户端授权模型，但实际使用仍需由使用者自行确认并遵守 OpenAI、AstrBot、部署平台及所在地区的相关规则。因使用本插件产生的账号、服务、费用、数据、封禁、合规或其他问题，均由使用者自行承担，本插件作者和贡献者不承担任何责任。
+使用 OpenAI 账号授权，在 AstrBot 中调用 Codex 模型。完成一次绑定后，可为多个模型添加提供商，共用插件保存的授权信息，无需逐个填写 API Key。
 
-AstrBot 的 Codex OAuth Provider 插件。插件会注册一个普通聊天模型提供商，其他插件和 AstrBot 本体可以按标准 provider 调用，无需处理 OAuth token。
+支持聊天、流式回复、图片理解、工具调用、推理强度设置、联网搜索，以及供其他插件调用的图片生成、音频转录和实时音频接口。
 
-当前插件可以正常运行，有些功能是和AI大人合作的，还在实验中，欢迎反馈。
+**快速开始：安装插件 → 完成账号授权 → 添加模型 → 测试。**
 
-本项目与 AstrBot 社区需求 [AstrBotDevs/AstrBot#5206: [Feature] 支持 OpenAI OAuth](https://github.com/AstrBotDevs/AstrBot/issues/5206) 相关。
+## 1. 安装插件
 
-Provider 类型：
+在 AstrBot 的插件管理页面，使用仓库地址安装并启用：
+
+```text
+https://github.com/RhoninSeiei/astrbot_plugin_codex_oauth_plug
+```
+
+打开插件配置。通常只需要检查两项，其余保持默认：
+
+| 配置项 | 填写方式 |
+| --- | --- |
+| HTTP 代理 | AstrBot 能直接访问服务时留空；需要代理时填写 AstrBot 所在环境能访问的 HTTP 代理地址。 |
+| 模型列表 | 保留默认列表即可；每行一个模型 ID，可增删。首行是连接测试的默认模型。 |
+
+Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿主机时，应使用容器能够访问的地址。
+
+“OAuth 凭据”由授权流程自动填写，无需手动复制 Access token、Refresh token 或账号 ID。
+
+## 2. 完成账号授权
+
+使用 AstrBot 管理员账号，建议在与机器人的私聊中操作。以下示例使用默认唤醒前缀 `/`；如果修改过前缀，请相应替换。
+
+1. 发送：
+
+   ```text
+   /codex_oauth_start
+   ```
+
+2. 打开机器人返回的链接，在浏览器中登录 OpenAI 账号并完成授权。
+3. 浏览器跳转后，复制地址栏中的**完整回调地址**。回调地址可能以 `http://localhost:1455/` 开头；远程部署时页面打不开也可复制地址，只要其中包含 `code` 和 `state`。
+4. 将回调地址放在命令后发送：
+
+   ```text
+   /codex_oauth_complete 完整回调地址
+   ```
+
+5. 看到绑定成功后，发送：
+
+   ```text
+   /codex_oauth_test
+   ```
+
+测试成功会返回模型名称和耗时。回调地址及凭据包含敏感信息，请勿发布到群聊、截图或公开问题单。
+
+<details>
+<summary>其他授权输入方式</summary>
+
+`codex_oauth_complete` 也接受 `code#state` 或 Codex `auth.json` 的 JSON 内容。授权码方式需要先在当前插件运行期间执行 `codex_oauth_start`；JSON 导入不需要先创建授权流程。
+
+优先使用独立授权流程。不要让独立插件和其他运行中的服务同时刷新同一份 Refresh token，否则可能因令牌轮换导致授权失效。
+
+</details>
+
+## 3. 添加模型提供商
+
+在 AstrBot 的模型提供商页面新增提供商，选择名称包含 **Codex OAuth 插件** 的类型。旧版本界面可能显示 `OAuth_plug OpenAI Codex OAuth`，类型标识始终为：
 
 ```text
 oauth_plug_openai_codex_chat_completion
 ```
 
-名称中保留 `oauth_plug_` 前缀，用来和 AstrBot 本体或其他插件提供的 OAuth 实现区分。
+选择模型并启用该提供商，然后在会话或默认模型设置中选择它。授权信息由插件提供，模板中的 Key 占位值保持原样即可。
 
-## 配置示意
+| 模型 ID | 可用推理强度 |
+| --- | --- |
+| `gpt-6-astra` | `low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-5.6-sol` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-5.6-terra` | 同上 |
+| `gpt-5.6-luna` | 同上 |
 
-![配置示意](docs/assets/codex-oauth-plug-config.png)
+模型是否实际可用取决于账号权限和服务端支持。旧模型及自定义模型 ID 仍可填写。
 
-## 使用方式
+已有 AstrBot 内建 OAuth 时，注意选择带插件名称的类型；内建 `openai_oauth_chat_completion` 与本插件分别管理授权。
 
-1. 安装并启用插件。
-2. 在插件配置中填写代理和模型列表，例如 `http://127.0.0.1:7890`、`gpt-5.6-sol`。配置页主要用于查看状态、填写参数和检查最近生成的授权信息。
-3. 管理员发送 `codex_oauth_start` 获取授权地址。<img width="608" height="338" alt="image" src="https://github.com/user-attachments/assets/b912302b-844c-48a1-8121-9180ffb342f4" />
-4. 在浏览器完成 OpenAI 登录后，复制完整回调 URL。<img width="541" height="703" alt="03d9c240acb998532c0bebda02587589" src="https://github.com/user-attachments/assets/c99b0672-70cb-4bfd-b7a9-ed834151641a" /><img width="1059" height="82" alt="f6ae88f15eaeb11d23d27ed88dd7a369" src="https://github.com/user-attachments/assets/f22402f6-4d16-4a97-b9da-f02cc7e9c2f3" />
-5. 管理员发送 `codex_oauth_complete <完整回调地址>` 完成绑定。<img width="608" height="177" alt="image" src="https://github.com/user-attachments/assets/81ba9677-f6fe-46aa-9727-625d3d47dc70" />
-6. 在模型提供商页面新增类型为 `oauth_plug_openai_codex_chat_completion` 的模型，然后按普通模型使用。该 provider 同时声明 `image_generate` 和 `image_edit`，其他插件可通过 provider 实例调用 `generate_image()` 进行文生图和参考图编辑。<img width="992" height="1251" alt="image" src="https://github.com/user-attachments/assets/7b3dc6bd-ca12-4644-91b9-a8cb2546efaf" />
-<img width="902" height="1000" alt="image" src="https://github.com/user-attachments/assets/f45d3a9b-ee67-4515-a4c0-7d11912483bb" /><img width="900" height="895" alt="image" src="https://github.com/user-attachments/assets/80255398-b6fe-47d3-b9d8-3088b8f6e0e4" /><img width="739" height="687" alt="image" src="https://github.com/user-attachments/assets/1b9f5596-215a-4d97-99be-8df9a4638876" />
+## 4. 常用设置
 
+### 推理强度
 
+在模型提供商的自定义请求体 `custom_extra_body` 中填写，例如：
 
-
-模型列表按行填写，用于提供商配置页面的标题（实际以提供商配置页面为准）。默认示例：
-
-```text
-gpt-5.6-sol
-gpt-5.6-terra
-gpt-5.6-luna
+```json
+{
+  "reasoning": {
+    "effort": "high"
+  }
+}
 ```
 
-## 插件接口
+不填写时由服务端决定默认强度。`off` 按 `none` 处理，GPT-6 Astra 不接受 `none`；单次模型请求不接受 `ultra`。
 
-### 聊天命令
+### 联网搜索
 
-以下命令默认需要 AstrBot 管理员权限。实际使用时需按当前 AstrBot 唤醒前缀发送，例如默认配置下使用 `/codex_oauth_start`。
+在插件高级设置中选择联网搜索模式：
 
-```text
-codex_oauth_start
-codex_oauth_complete <完整回调地址/code#state/Codex auth.json>
-codex_oauth_refresh
-codex_oauth_test
-```
+| 模式 | 行为 |
+| --- | --- |
+| `disabled` | 默认关闭内建搜索。 |
+| `cached` | 允许使用缓存搜索结果。 |
+| `live` | 允许实时访问网页。 |
 
-`codex_oauth_start` 会生成授权地址，并写入配置中的 `last_authorize_url`。`codex_oauth_complete` 完成绑定后会清空临时授权字段。`codex_oauth_test` 会发送一次最小 Codex backend `/responses` 请求，并返回端侧延迟。
+可选填写允许搜索的域名列表，例如 `example.com`，不要填写完整 URL。配置用于插件提供商，具体提供商和单次调用的覆盖方式见[开发接口](docs/API.md)。
 
-### 生图调用
+### 图片与音频
 
-其他插件调用 OAuth 生图能力时，可从 AstrBot context 取得 provider 实例，再按用途检查能力字段。文生图需要 `image_generate`；传入参考图进行编辑时同时需要 `image_edit`。
+图片生成和参考图编辑通过其他插件调用 `generate_image()` 使用，不会自动增加生图聊天命令。
 
-```python
-provider = context.get_provider_by_id(provider_id)
-# 或使用当前会话正在使用的 provider：
-# provider = context.get_using_provider(umo=event.unified_msg_origin)
+音频转录默认关闭。只有账号具备转录权限时才启用；也可继续使用 AstrBot 自身的语音转文字提供商。实时音频接口供插件开发者使用，需要调用方处理 WebRTC 音频连接，不是开箱即用的语音聊天页面。
 
-capabilities = getattr(provider, "capabilities", {}) if provider else {}
-if not capabilities.get("image_generate"):
-    raise RuntimeError("当前 provider 缺少生图能力")
+## 常见问题
 
-reference_images = ["/tmp/reference.png"]
-if reference_images and not capabilities.get("image_edit"):
-    raise RuntimeError("当前 provider 缺少参考图编辑能力")
+| 现象 | 处理方法 |
+| --- | --- |
+| 找不到插件提供商类型 | 确认插件已启用，且配置中的“启用插件提供商”开启；刷新模型提供商页面。 |
+| 授权回调页面打不开 | 复制地址栏完整 URL，通过 `codex_oauth_complete` 提交，无需开放宿主机的 1455 端口。 |
+| 提示流程未开始、已过期或 state 不匹配 | 重新执行 `codex_oauth_start`，使用这次生成的授权链接及回调地址；授权中途不要重载插件。 |
+| 提示尚未绑定或缺少账号 ID | 重新完成完整授权流程，不要只填 Access token。 |
+| 连接超时或代理连接失败 | 检查 AstrBot 容器内的网络和代理地址，确认代理允许来自容器的连接。 |
+| 令牌刷新失败或 `refresh_token_reused` | 重新授权，并避免多个服务共同刷新同一份授权凭据。 |
+| 模型测试成功，聊天仍使用其他模型 | 在 AstrBot 会话或默认模型设置中选择刚添加的插件提供商。 |
 
-images = await provider.generate_image(
-    prompt="根据参考图重绘背景",
-    model="gpt-5.6-sol",
-    size="1024x1024",
-    n=1,
-    reference_images=reference_images,
-    timeout=180.0,
-)
-```
+## 命令速查
 
-`provider_id` 取模型服务提供商页面中的实际 provider ID。`reference_images` 支持本地文件路径、`file://` 路径、HTTP 图片地址和 `data:image/...`；传入参考图时默认使用图片编辑请求，未传参考图时默认使用文生图请求。`action` 可显式传入 `generate`、`edit` 或 backend 支持的其他取值。
+| 管理员命令 | 用途 |
+| --- | --- |
+| `/codex_oauth_start` | 获取新的授权链接。 |
+| `/codex_oauth_complete 授权输入` | 提交回调地址、`code#state` 或 JSON 凭据。 |
+| `/codex_oauth_test` | 测试默认模型。 |
+| `/codex_oauth_test gpt-6-astra` | 测试指定模型。 |
+| `/codex_oauth_refresh` | 手动刷新授权；正常调用会自动刷新。 |
 
-`timeout` 是可选的单次图片请求超时秒数，省略或传入 `None` 时使用 provider 默认超时。该参数只影响本次 `generate_image()` 调用，并保持 provider 默认超时值，适合 GroupChat、ImgFlow 等插件按图片任务单独设置等待时间。
+## 开发与版本
 
-返回值是图片结果对象列表，常用字段为：
+- [开发接口：聊天、推理、搜索、生图、音频和 Web API](docs/API.md)
+- [更新日志](CHANGELOG.md)
+- [AGPL-3.0 许可证](LICENSE)
+- [代码来源与原 MIT 版权声明](NOTICE.md)
 
-```python
-image.path
-image.mime_type
-image.revised_prompt
-image.raw
-```
+本插件适配 AstrBot 的 Provider 接口，参考 OpenClaw 的 Codex OAuth 实现思路。能力随账号权限、服务端协议和 AstrBot 版本变化；具体测试范围见更新日志。相关社区需求：[AstrBot #5206](https://github.com/AstrBotDevs/AstrBot/issues/5206)。
 
-`path` 指向已经写入磁盘的生成图片文件，调用方可按 AstrBot 消息组件或自身业务逻辑继续发送、读取或转存该文件。`generated_image_dir` 可在插件高级配置中指定保存目录；留空时，图片会保存到 AstrBot data 下的 `generated/oauth_plug_openai_codex_images`。
-
-### Web API
-
-```text
-POST /api/plug/oauth-plug-openai-codex/start
-POST /api/plug/oauth-plug-openai-codex/complete
-POST /api/plug/oauth-plug-openai-codex/refresh
-POST /api/plug/oauth-plug-openai-codex/test
-POST /api/plug/oauth-plug-openai-codex/disconnect
-```
-
-`refresh` 用于手动刷新令牌。正常模型调用时，插件也会在 token 即将过期或遇到 `401/403` 时自动刷新。
-
-当前 AstrBot 插件配置 schema 以表单渲染为主，授权、刷新和测试通过管理员聊天命令或 Web API 触发。
-
-## 实现参考
-
-本项目参考 OpenClaw 对 Codex OAuth 的使用方式，将 OAuth 登录、token 刷新和 Codex backend `/responses` 请求组织为 AstrBot provider source。插件不会把 OAuth access token 当成普通 OpenAI API Key 使用，模型请求会携带账号态所需的 `chatgpt-account-id`、`originator` 等字段。
-
-OpenClaw 相关文档：
-
-```text
-https://docs.openclaw.ai/concepts/oauth
-```
-
-## 免责声明
-
-本插件仅提供技术实现。使用者需要自行确认 OpenAI 账号、Codex OAuth、ChatGPT Codex backend、AstrBot 部署环境和相关网络环境的使用是否符合各自服务条款、政策、费用规则和当地法律法规。
-
-本插件不保证相关服务长期可用，不保证接口行为保持稳定，也不保证适用于任何特定用途。因安装、配置、调用、二次开发或公开部署本插件产生的任何账号、数据、费用、服务可用性、合规或其他后果，均由使用者自行承担。本插件作者和贡献者不承担任何责任。
-
-## 开发状态
-
-当前版本用于验证插件化 Provider 方案。接口和配置项后续可能随 AstrBot 插件框架能力变化继续调整。
+本项目为非官方集成。使用前请确认账号授权和使用方式符合相关服务条款；请自行保管凭据。服务可用性、账号限制和配额由服务提供方决定。

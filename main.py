@@ -74,9 +74,12 @@ class OAuthPlugOpenAICodexPlugin(Star):
         )
 
     async def terminate(self) -> None:
-        if get_service() is self.service:
-            set_service(None)
-        unregister_provider_adapter()
+        try:
+            await self.service.close()
+        finally:
+            if get_service() is self.service:
+                set_service(None)
+                unregister_provider_adapter()
 
     def get_oauth_service(self) -> OpenAICodexOAuthService:
         return self.service

@@ -81,7 +81,7 @@ class RegistrationTests(unittest.TestCase):
 
             register_provider_adapter()
 
-        template_name = "OAuth_plug OpenAI Codex OAuth"
+        template_name = "Codex OAuth 插件 / OpenAI"
         self.assertIn(template_name, config_template)
         self.assertEqual(config_template[template_name]["type"], PROVIDER_TYPE)
 
@@ -95,4 +95,4 @@ class RegistrationTests(unittest.TestCase):
             register_provider_adapter()
             unregister_provider_adapter()
 
-        self.assertNotIn("OAuth_plug OpenAI Codex OAuth", config_template)
+        self.assertNotIn("Codex OAuth 插件 / OpenAI", config_template)

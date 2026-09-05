@@ -2,10 +2,10 @@
   "runtime": {
     "description": "运行设置",
     "type": "object",
-    "hint": "插件注册的 provider 类型为 oauth_plug_openai_codex_chat_completion。Provider 页面中新建该类型后，模型测试和聊天会通过插件保存的 OAuth 凭据请求 Codex backend。",
+    "hint": "首次使用只需检查代理和模型列表，然后按 README 执行管理员授权命令。OAuth 凭据会自动填写。",
     "items": {
       "enabled": {
-        "description": "启用 OAuth_plug provider",
+        "description": "启用插件提供商",
         "type": "bool",
         "default": true
       },
@@ -17,14 +17,14 @@
       "proxy": {
         "description": "HTTP 代理",
         "type": "string",
-        "hint": "示例：http://127.0.0.1:7890。留空则不使用代理。",
+        "hint": "可直接连接时留空。Docker 中 127.0.0.1 指容器自身，请填写容器能够访问的 HTTP 代理地址。",
         "default": ""
       },
       "models": {
         "description": "模型列表",
         "type": "text",
         "hint": "每行填写一个模型 ID，首行作为默认模型。示例：gpt-5.6-sol。",
-        "default": "gpt-5.6-sol\ngpt-5.6-terra\ngpt-5.6-luna"
+        "default": "gpt-5.6-sol\ngpt-6-astra\ngpt-5.6-terra\ngpt-5.6-luna"
       },
       "oauth_refresh_skew_seconds": {
         "description": "提前刷新秒数",
@@ -36,7 +36,7 @@
   "oauth": {
     "description": "OAuth 凭据",
     "type": "object",
-    "hint": "授权、刷新和测试通过管理员聊天命令或插件 Web API 触发。此处保留运行期调用 Codex backend 所需的凭据字段。",
+    "hint": "由 codex_oauth_start 和 codex_oauth_complete 自动管理，通常无需手动编辑。不要公开这些字段或包含字段值的截图。",
     "items": {
       "auth_mode": {
         "description": "认证模式",
@@ -44,27 +44,27 @@
         "default": "manual"
       },
       "oauth_provider": {
-        "description": "OAuth provider",
+        "description": "授权服务",
         "type": "string",
         "default": ""
       },
       "oauth_access_token": {
-        "description": "Access token",
+        "description": "访问令牌 Access token",
         "type": "text",
         "default": ""
       },
       "oauth_refresh_token": {
-        "description": "Refresh token",
+        "description": "刷新令牌 Refresh token",
         "type": "text",
         "default": ""
       },
       "oauth_expires_at": {
-        "description": "过期时间",
+        "description": "授权过期时间",
         "type": "string",
         "default": ""
       },
       "oauth_account_id": {
-        "description": "ChatGPT account id",
+        "description": "ChatGPT 账号 ID",
         "type": "string",
         "default": ""
       }
@@ -79,6 +79,34 @@
         "type": "string",
         "hint": "留空时保存到 AstrBot data/generated/oauth_plug_openai_codex_images。",
         "default": ""
+      },
+      "oauth_web_search": {
+        "description": "联网搜索模式",
+        "type": "string",
+        "options": [
+          "disabled",
+          "cached",
+          "live"
+        ],
+        "default": "disabled",
+        "hint": "disabled 关闭；cached 使用缓存；live 允许实时网页访问。"
+      },
+      "oauth_web_search_domains": {
+        "description": "允许搜索的域名",
+        "type": "list",
+        "default": [],
+        "hint": "留空不限域名。填写 example.com，不要填写完整 URL。"
+      },
+      "oauth_audio_transcription": {
+        "description": "自动转录聊天音频",
+        "type": "bool",
+        "default": false,
+        "hint": "默认关闭。账号具备音频转录权限时才能启用；否则请配置 AstrBot STT。"
+      },
+      "oauth_transcription_model": {
+        "description": "音频转录模型",
+        "type": "string",
+        "default": "gpt-4o-transcribe"
       }
     }
   }

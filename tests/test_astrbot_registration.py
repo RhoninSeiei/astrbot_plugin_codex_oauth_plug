@@ -29,6 +29,8 @@ except Exception:
 class AstrBotRegistrationTests(unittest.TestCase):
     def tearDown(self):
         unregister_provider_adapter()
+        from oauth_plug_openai_codex.service import set_service
+        set_service(None)
 
     def test_register_provider_adapter_replaces_existing_type(self):
         register_provider_adapter()
@@ -37,7 +39,7 @@ class AstrBotRegistrationTests(unittest.TestCase):
         self.assertIn(PROVIDER_TYPE, provider_cls_map)
         self.assertEqual(
             provider_cls_map[PROVIDER_TYPE].provider_display_name,
-            "OAuth_plug OpenAI Codex OAuth",
+            "Codex OAuth 插件 / OpenAI",
         )
 
     def test_register_provider_adapter_injects_dashboard_template(self):
@@ -46,7 +48,7 @@ class AstrBotRegistrationTests(unittest.TestCase):
         templates = CONFIG_METADATA_2["provider_group"]["metadata"]["provider"][
             "config_template"
         ]
-        template_name = "OAuth_plug OpenAI Codex OAuth"
+        template_name = "Codex OAuth 插件 / OpenAI"
 
         self.assertIn(template_name, templates)
         self.assertEqual(templates[template_name]["type"], PROVIDER_TYPE)

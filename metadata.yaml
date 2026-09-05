@@ -1,6 +1,7 @@
 name: astrbot_plugin_codex_oauth_plug
-desc: OpenAI Codex OAuth provider plugin for AstrBot
-version: v0.1.4
+display_name: Codex OAuth 账号授权
+desc: 使用 OpenAI 账号授权的 Codex 模型插件，支持流式聊天、联网搜索与图片音频扩展
+version: v0.2.0
 author: RhoninSeiei
 repo: https://github.com/RhoninSeiei/astrbot_plugin_codex_oauth_plug
 astrbot_version: ">=4.24.0"
