@@ -1889,7 +1889,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             n: Number of backend image generations.
             reference_images: Local files, URLs, or data URLs used as references.
             action: Image tool action override.
-            timeout: Optional per-image timeout, retaining the HTTP request timeout.
+            timeout: Optional per-image deadline, including the whole HTTP request.
             transport: Image transport, either HTTP or WebSocket.
 
         Returns:
@@ -1900,6 +1900,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         """
         if transport not in {"http", "websocket"}:
             raise ValueError("图片传输方式必须为 http 或 websocket。")
+        explicit_timeout = timeout is not None
         if timeout is None:
             request_timeout = self.timeout
         else:
@@ -1948,6 +1949,11 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 if transport == "websocket":
                     response = await self._request_image_backend_websocket(
                         payload, timeout=request_timeout
+                    )
+                elif explicit_timeout:
+                    response = await asyncio.wait_for(
+                        self._request_image_backend(payload, request_timeout),
+                        timeout=request_timeout,
                     )
                 else:
                     response = await self._request_image_backend(

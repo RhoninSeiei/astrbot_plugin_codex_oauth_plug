@@ -46,7 +46,7 @@ class SchemaTests(unittest.TestCase):
         metadata = (repo_root / "metadata.yaml").read_text(encoding="utf-8")
         changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
 
-        self.assertIn("version: v0.2.0", metadata)
+        self.assertIn("version: v0.3.0", metadata)
         self.assertIn('astrbot_version: ">=4.24.0"', metadata)
         self.assertIn("## 未发布", changelog)
         self.assertIn("GPT-5.6", changelog)

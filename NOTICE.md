@@ -10,7 +10,7 @@
 
 上游项目：[AstrBotDevs/AstrBot](https://github.com/AstrBotDevs/AstrBot)。上游作者与贡献者保留其版权，许可为 AGPL-3.0。
 
-本次同步基于 AstrBot 4.27.5 维护版本的 OAuth 实现，以下文件包含直接改编的实现：
+首次同步基于 AstrBot 4.27.5 维护版本的 OAuth 实现；v0.3.0 于 2026-09-27 继续核对并同步 AstrBot 4.28.1 维护版本的相关修复。以下文件包含直接改编的实现：
 
 - `oauth_plug_openai_codex/provider.py`：源自 `astrbot/core/provider/sources/openai_oauth_source.py`。
 - `oauth_plug_openai_codex/openai_oauth_audio.py`

@@ -6,6 +6,8 @@
 
 **快速开始：安装插件 → 完成账号授权 → 添加模型 → 测试。**
 
+以下截图来自 AstrBot 4.28.1 的独立演示实例，使用空白凭据和示例配置；没有加载生产账号、令牌或内网地址。截图对应真实界面，不是设计示意图。使用定制整合版 OAuth 的现有生产环境无需为了本文启用独立插件。
+
 ## 1. 安装插件
 
 在 AstrBot 的插件管理页面，使用仓库地址安装并启用：
@@ -24,6 +26,10 @@ https://github.com/RhoninSeiei/astrbot_plugin_codex_oauth_plug
 Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿主机时，应使用容器能够访问的地址。
 
 “OAuth 凭据”由授权流程自动填写，无需手动复制 Access token、Refresh token 或账号 ID。
+
+在插件卡片上点击齿轮打开配置，找到“运行设置”。作为独立 OAuth 提供商使用时，保持“仅额度工具模式”关闭、“启用插件提供商”开启。
+
+![插件运行设置：代理、模型列表和启用选项](docs/assets/screenshots/runtime-settings.png)
 
 ## 2. 完成账号授权
 
@@ -69,6 +75,14 @@ oauth_plug_openai_codex_chat_completion
 ```
 
 选择模型并启用该提供商，然后在会话或默认模型设置中选择它。授权信息由插件提供，模板中的 Key 占位值保持原样即可。
+
+在“新增”窗口搜索 `Codex OAuth 插件`，选择 **Codex OAuth 插件 / OpenAI**。
+
+![在新增模型提供商窗口搜索插件模板](docs/assets/screenshots/provider-template.png)
+
+首次配置点击“保存并获取模型”，已有提供商点击“获取模型列表”。在目标模型右侧点击 `+` 添加，再在 AstrBot 会话或默认模型设置中选择它。模型列表来自插件配置，成功显示列表不代表账号授权或真实模型请求已经通过；授权后仍需执行 `codex_oauth_test`。
+
+![插件提供商的模型列表与添加入口](docs/assets/screenshots/provider-models.png)
 
 | 模型 ID | 可用推理强度 |
 | --- | --- |
@@ -136,9 +150,13 @@ oauth_plug_openai_codex_chat_completion
 
 在 `usage.provider_id` 填入已配置的 Codex OAuth 模型提供商 ID，例如 `openai_oauth/gpt-6-sol`，即可固定查询账号。此后命令无需聊天模型，工具也不限调用模型的厂商，只要求调用模型支持工具调用。查询额度属于目标 OAuth 账号，并不是调用模型自身的额度。兼容内置 `openai_oauth_chat_completion` 和本插件提供商；目标不存在或不是 OAuth 时明确报错，不自动改查其他账号。该设置留空时沿用当前会话的 OAuth 提供商。
 
-使用内置 OAuth 时，可启用本插件并设置 `runtime.tools_only=true`；此模式不注册插件提供商或授权 Web API，授权命令也不会执行。原有 OAuth 登录和聊天模型由内置提供商继续管理。修改此模式后需要重载插件。
+如果现有内置 OAuth 尚未提供额度查询，又希望使用独立额度工具，可设置 `runtime.tools_only=true`；此模式不注册插件提供商或授权 Web API，授权命令也不会执行。原有 OAuth 登录和聊天模型由内置提供商继续管理。修改此模式后需要重载插件。定制整合版本已经包含额度查询时，无需启用本插件。
 
 `usage.enabled` 控制命令与工具查询；默认仅管理员私聊可用。群聊需要在 `usage.group_allowlist` 填入完整 `unified_msg_origin`，并且查询者仍须为管理员。
+
+“额度查询目标提供商”填写模型页面实际保存的提供商 ID；与上方来源名称不同，它通常包含模型名称。截图保留空白字段，不含真实账号或群会话信息。
+
+![额度查询工具：启用开关、目标提供商和群会话白名单](docs/assets/screenshots/usage-settings.png)
 
 接口只访问官方额度地址，使用当前 OAuth 凭据和提供商代理，不发起模型推理、不刷新令牌。成功结果缓存 60 秒，按授权账号和令牌隔离；服务关闭时清空。缺失窗口或字段表示未知，不代表零，也不能换算为剩余请求次数。401、403、429、网络失败和解析失败分别返回查询状态，不返回原始响应、账号 ID 或凭据。
 

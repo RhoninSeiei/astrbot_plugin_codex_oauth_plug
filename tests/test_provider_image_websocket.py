@@ -208,6 +208,32 @@ class ImageWebSocketTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[2][1]["tools"][0]["action"], "generate")
         self.assertTrue(ProviderOAuthPlugOpenAICodex.capabilities["image_websocket"])
 
+    async def test_explicit_http_timeout_is_a_total_deadline(self):
+        provider = self.make_provider()
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocked_http(_payload, _request_timeout):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        provider._request_image_backend = blocked_http
+        task = asyncio.create_task(provider.generate_image("cat", timeout=0.02))
+        await asyncio.wait_for(started.wait(), 1)
+        done, _pending = await asyncio.wait({task}, timeout=0.15)
+        try:
+            self.assertIn(task, done, "explicit timeout must bound the whole HTTP call")
+            with self.assertRaises(TimeoutError):
+                await task
+            self.assertTrue(cancelled.is_set())
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def test_websocket_reassembles_image_stream_and_edit_references(self):
         provider = self.make_provider()
         captured = []
