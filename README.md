@@ -73,6 +73,8 @@ oauth_plug_openai_codex_chat_completion
 | 模型 ID | 可用推理强度 |
 | --- | --- |
 | `gpt-6-astra` | `low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-6-sol` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-6-luna` | 同上 |
 | `gpt-5.6-sol` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-5.6-terra` | 同上 |
 | `gpt-5.6-luna` | 同上 |
@@ -112,6 +114,7 @@ oauth_plug_openai_codex_chat_completion
 ### 图片与音频
 
 图片生成和参考图编辑通过其他插件调用 `generate_image()` 使用，不会自动增加生图聊天命令。
+该接口默认使用 HTTP；需要图片 WebSocket 流时可传入 `transport="websocket"`，并通过 `image_websocket` 能力标记判断是否可用。
 
 音频转录默认关闭。只有账号具备转录权限时才启用；也可继续使用 AstrBot 自身的语音转文字提供商。实时音频接口供插件开发者使用，需要调用方处理 WebRTC 音频连接，不是开箱即用的语音聊天页面。
 

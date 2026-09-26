@@ -11,7 +11,7 @@ import mimetypes
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from contextlib import aclosing, asynccontextmanager
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -41,10 +41,30 @@ from .provider_runtime_compat import (
 
 from .headers import build_codex_backend_headers
 from .service import OAUTH_PLACEHOLDER_KEY, get_service
+
 oauth_provider_stat_kind: ContextVar[str] = ContextVar(
     "oauth_provider_stat_kind",
     default="text",
 )
+IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+IMAGE_WEBSOCKET_MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
+IMAGE_WEBSOCKET_MAX_EVENTS = 16384
+
+
+class OpenAIOAuthImageStreamError(RuntimeError):
+    """Sanitized image transport failure with a safe retry indicator."""
+
+    def __init__(
+        self,
+        reason_code: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(f"Codex image WebSocket request ended: {reason_code}.")
+        self.reason_code = reason_code
+        self.status_code = status_code
+        self.retryable = retryable
 
 
 @dataclass
@@ -64,11 +84,34 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         "reasoning": True,
         "image_generate": True,
         "image_edit": True,
+        "image_websocket": True,
     }
     model_capabilities = {
         "gpt-6-astra": {
             "default_reasoning_effort": "medium",
             "supported_reasoning_efforts": (
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ),
+        },
+        "gpt-6-sol": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ),
+        },
+        "gpt-6-luna": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "none",
                 "low",
                 "medium",
                 "high",
@@ -164,7 +207,11 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
     def __init__(self, provider_config, provider_settings) -> None:
         service = get_service()
         self._oauth_service = service
-        provider_config = service.build_provider_config(provider_config) if service is not None else dict(provider_config)
+        provider_config = (
+            service.build_provider_config(provider_config)
+            if service is not None
+            else dict(provider_config)
+        )
         patched_config = dict(provider_config)
         patched_config.pop("oauth_shared_state", None)
         patched_config["key"] = [OAUTH_PLACEHOLDER_KEY]
@@ -577,6 +624,165 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 status_code=status_code,
             )
         return self._parse_backend_response(text)
+
+    async def _request_image_backend_websocket(
+        self,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Submit one image request with a total deadline and no ambiguous replay."""
+        import aiohttp
+
+        deadline_seconds = float(self.timeout if timeout is None else timeout)
+        if (
+            isinstance(timeout, bool)
+            or not math.isfinite(deadline_seconds)
+            or deadline_seconds <= 0
+        ):
+            raise ValueError("timeout 必须是有限正浮点数。")
+        base = urlsplit(self.base_url)
+        if (
+            base.scheme not in {"https", "http"}
+            or not base.netloc
+            or base.query
+            or base.fragment
+        ):
+            raise ValueError("图片 WebSocket 后端地址无效。")
+        scheme = "wss" if base.scheme == "https" else "ws"
+        url = f"{scheme}://{base.netloc}{base.path.rstrip('/')}/responses"
+        submitted = False
+
+        async def reject_redirect(_session, _context, params):
+            raise OpenAIOAuthImageStreamError(
+                "request_rejected", status_code=params.response.status
+            )
+
+        try:
+            async with asyncio.timeout(deadline_seconds):
+                if getattr(self, "_oauth_media_closed", False):
+                    raise OpenAIOAuthImageStreamError("provider_closed")
+                await self._ensure_fresh_oauth_token()
+                if not hasattr(self, "_oauth_stream_clients"):
+                    self._oauth_stream_clients = set()
+                for auth_attempt in range(2):
+                    if getattr(self, "_oauth_media_closed", False):
+                        raise OpenAIOAuthImageStreamError("provider_closed")
+                    headers, attempted_version = (
+                        self._build_backend_headers_with_version()
+                    )
+                    trace = aiohttp.TraceConfig()
+                    trace.on_request_redirect.append(reject_redirect)
+                    resources = AsyncExitStack()
+                    self._oauth_stream_clients.add(resources)
+                    try:
+                        async with resources:
+                            session = await resources.enter_async_context(
+                                aiohttp.ClientSession(
+                                    timeout=aiohttp.ClientTimeout(total=None),
+                                    trace_configs=[trace],
+                                )
+                            )
+                            if getattr(self, "_oauth_media_closed", False):
+                                raise OpenAIOAuthImageStreamError("provider_closed")
+                            websocket = await resources.enter_async_context(
+                                session.ws_connect(
+                                    url,
+                                    headers=headers,
+                                    proxy=self.provider_config.get("proxy") or None,
+                                    heartbeat=20,
+                                    max_msg_size=IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES,
+                                )
+                            )
+                            if getattr(self, "_oauth_media_closed", False):
+                                raise OpenAIOAuthImageStreamError("provider_closed")
+                            request = {
+                                key: value
+                                for key, value in payload.items()
+                                if key not in {"stream", "background"}
+                            }
+                            submitted = True
+                            await websocket.send_json(
+                                {"type": "response.create", **request}
+                            )
+                            lines: list[str] = []
+                            received_bytes = 0
+                            async for message in websocket:
+                                if message.type != aiohttp.WSMsgType.TEXT:
+                                    raise OpenAIOAuthImageStreamError("outcome_unknown")
+                                received_bytes += len(message.data.encode("utf-8"))
+                                if (
+                                    received_bytes
+                                    > IMAGE_WEBSOCKET_MAX_TRANSCRIPT_BYTES
+                                    or len(lines) >= IMAGE_WEBSOCKET_MAX_EVENTS
+                                ):
+                                    raise OpenAIOAuthImageStreamError("outcome_unknown")
+                                event = json.loads(message.data)
+                                if not isinstance(event, dict):
+                                    raise OpenAIOAuthImageStreamError("outcome_unknown")
+                                lines.append("data: " + message.data)
+                                event_type = event.get("type")
+                                if event_type in {
+                                    "error",
+                                    "response.error",
+                                    "response.failed",
+                                    "response.incomplete",
+                                }:
+                                    status = self._extract_stream_error_status_code(
+                                        event
+                                    )
+                                    reason = (
+                                        "upstream_unavailable"
+                                        if status and status >= 500
+                                        else "request_rejected"
+                                    )
+                                    if status == 429:
+                                        reason = "rate_limited"
+                                    raise OpenAIOAuthImageStreamError(
+                                        reason, status_code=status
+                                    )
+                                if event_type == "response.completed":
+                                    return self._parse_backend_response(
+                                        "\n".join(lines)
+                                    )
+                            raise OpenAIOAuthImageStreamError("outcome_unknown")
+                    except aiohttp.WSServerHandshakeError as error:
+                        if error.status == 401 and auth_attempt == 0:
+                            if await self._refresh_after_auth_failure(
+                                attempted_version
+                            ):
+                                continue
+                        reason = (
+                            "rate_limited"
+                            if error.status == 429
+                            else "request_rejected"
+                        )
+                        raise OpenAIOAuthImageStreamError(
+                            reason,
+                            status_code=error.status,
+                            retryable=error.status == 429 or error.status >= 500,
+                        ) from None
+                    finally:
+                        self._oauth_stream_clients.discard(resources)
+        except asyncio.CancelledError:
+            raise
+        except OpenAIOAuthImageStreamError:
+            raise
+        except TimeoutError:
+            raise OpenAIOAuthImageStreamError(
+                "outcome_unknown" if submitted else "timeout",
+                retryable=not submitted,
+            ) from None
+        except (aiohttp.ClientError, OSError):
+            raise OpenAIOAuthImageStreamError(
+                "outcome_unknown" if submitted else "connection_failed",
+                retryable=not submitted,
+            ) from None
+        except Exception:
+            raise OpenAIOAuthImageStreamError(
+                "outcome_unknown" if submitted else "provider_failed",
+            ) from None
+        raise OpenAIOAuthImageStreamError("request_rejected")
 
     def _format_backend_error(self, status_code: int, text: str) -> str:
         stripped = text.strip()
@@ -1126,9 +1332,17 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         params.pop("max_output_tokens", None)
         params.pop("temperature", None)
         model_name = str(params.get("model") or "").strip().lower()
-        if model_name.startswith("gpt-6-astra"):
+        is_gpt_6 = model_name.startswith("gpt-6-astra") or model_name in {
+            "gpt-6-sol",
+            "gpt-6-luna",
+        }
+        if is_gpt_6:
             params.pop("top_p", None)
             params.pop("top_logprobs", None)
+        strips_reasoning_sampling = model_name.startswith("gpt-6-astra") or (
+            is_gpt_6 and reasoning.get("effort", "medium") != "none"
+        )
+        if strips_reasoning_sampling:
             include = params.get("include")
             if isinstance(include, list):
                 filtered_include = [
@@ -1664,6 +1878,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         reference_images: list[str] | None = None,
         action: str | None = None,
         timeout: float | None = None,
+        transport: str = "http",
     ) -> list[OAuthPlugImageResult]:
         """Generate images and persist aggregate OAuth token usage.
 
@@ -1674,6 +1889,8 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             n: Number of backend image generations.
             reference_images: Local files, URLs, or data URLs used as references.
             action: Image tool action override.
+            timeout: Optional per-image timeout, retaining the HTTP request timeout.
+            transport: Image transport, either HTTP or WebSocket.
 
         Returns:
             Extracted image results from all backend generations.
@@ -1681,10 +1898,14 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         Raises:
             Exception: Re-raises validation, backend, or extraction failures.
         """
+        if transport not in {"http", "websocket"}:
+            raise ValueError("图片传输方式必须为 http 或 websocket。")
         if timeout is None:
             request_timeout = self.timeout
         else:
             try:
+                if isinstance(timeout, bool):
+                    raise ValueError("timeout 必须是有限正浮点数。")
                 request_timeout = float(timeout)
             except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError("timeout 必须是有限正浮点数。") from exc
@@ -1724,7 +1945,14 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     "stream": True,
                     "store": False,
                 }
-                response = await self._request_image_backend(payload, request_timeout)
+                if transport == "websocket":
+                    response = await self._request_image_backend_websocket(
+                        payload, timeout=request_timeout
+                    )
+                else:
+                    response = await self._request_image_backend(
+                        payload, request_timeout
+                    )
                 response_usage = self._extract_response_usage(response.get("usage"))
                 if response_usage is not None:
                     total_usage = total_usage + response_usage

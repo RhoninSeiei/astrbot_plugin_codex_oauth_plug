@@ -86,8 +86,9 @@ for image in images:
 - `reference_images` 支持本地路径、`file://`、HTTP 图片 URL 和 `data:image/...`。
 - 有参考图时默认 `action=edit`，无参考图时默认 `action=generate`，也可显式传入 `action`。
 - `timeout` 为本次图片请求的超时秒数；省略或为 `None` 时使用提供商默认值，不修改其他调用的超时。
+- `transport="http"` 为默认的历史接口；可在调用方确认 `image_websocket` 能力后传入 `transport="websocket"`。WebSocket 的 `timeout` 覆盖令牌刷新、连接、发送与接收的总时长。
 - 结果对象包含 `path`、`mime_type`、`revised_prompt` 和 `raw`。
-- 文件保存到插件配置的 `generated_image_dir`；留空时为 AstrBot data 下的 `generated/oauth_plug_openai_codex_images`。调用方负责发送、转存和后续文件管理。
+- 文件保存到插件配置的 `generated_image_dir`；留空时为 AstrBot data 下的 `generated/openai_oauth_images`。调用方负责发送、转存和后续文件管理。
 
 ## 音频转录
 

@@ -24,7 +24,7 @@
         "description": "模型列表",
         "type": "text",
         "hint": "每行填写一个模型 ID，首行作为默认模型。示例：gpt-5.6-sol。",
-        "default": "gpt-5.6-sol\ngpt-6-astra\ngpt-5.6-terra\ngpt-5.6-luna"
+        "default": "gpt-5.6-sol\ngpt-6-astra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-terra\ngpt-5.6-luna"
       },
       "oauth_refresh_skew_seconds": {
         "description": "提前刷新秒数",
@@ -77,7 +77,7 @@
       "generated_image_dir": {
         "description": "生图保存目录",
         "type": "string",
-        "hint": "留空时保存到 AstrBot data/generated/oauth_plug_openai_codex_images。",
+        "hint": "留空时保存到 AstrBot data/generated/openai_oauth_images。",
         "default": ""
       },
       "oauth_web_search": {

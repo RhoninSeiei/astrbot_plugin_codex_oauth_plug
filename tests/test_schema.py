@@ -23,7 +23,7 @@ class SchemaTests(unittest.TestCase):
     def test_default_provider_source_id_does_not_include_model(self):
         self.assertEqual(DEFAULT_PROVIDER_CONFIG["id"], "oauth_plug_openai_codex")
 
-    def test_schema_defaults_to_all_gpt_5_6_models(self):
+    def test_schema_lists_gpt_6_models_without_changing_default(self):
         schema_path = Path(__file__).resolve().parents[1] / "_conf_schema.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
@@ -31,7 +31,14 @@ class SchemaTests(unittest.TestCase):
 
         self.assertEqual(
             models,
-            ["gpt-5.6-sol", "gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"],
+            [
+                "gpt-5.6-sol",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ],
         )
 
     def test_release_metadata_and_changelog_cover_gpt_5_6_release(self):

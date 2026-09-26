@@ -10,7 +10,10 @@ import httpx
 
 from .headers import build_codex_backend_headers
 from .oauth import create_pkce_flow, exchange_authorization_code, refresh_access_token
-from .openai_oauth_shared_state import OpenAIOAuthSharedState, OPENAI_OAUTH_CREDENTIAL_FIELDS
+from .openai_oauth_shared_state import (
+    OpenAIOAuthSharedState,
+    OPENAI_OAUTH_CREDENTIAL_FIELDS,
+)
 
 PROVIDER_TYPE = "oauth_plug_openai_codex_chat_completion"
 OAUTH_PLACEHOLDER_KEY = "__oauth_plug_openai_codex__"
@@ -19,6 +22,8 @@ DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_MODELS = (
     DEFAULT_MODEL,
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6-luna",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
 )
@@ -33,10 +38,13 @@ class OpenAICodexOAuthService:
         self._authorization_epoch = 0
         self._closed = False
         self._providers = WeakSet()
-        self.shared_state = OpenAIOAuthSharedState("oauth_plug_openai_codex", {
-            key: self._get_config_value(key, "oauth")
-            for key in OPENAI_OAUTH_CREDENTIAL_FIELDS
-        })
+        self.shared_state = OpenAIOAuthSharedState(
+            "oauth_plug_openai_codex",
+            {
+                key: self._get_config_value(key, "oauth")
+                for key in OPENAI_OAUTH_CREDENTIAL_FIELDS
+            },
+        )
 
     def register_provider(self, provider) -> None:
         self._require_open()
@@ -53,7 +61,9 @@ class OpenAICodexOAuthService:
         self.shared_state.replace({})
         providers = list(self._providers)
         self._providers.clear()
-        results = await asyncio.gather(*(p.terminate() for p in providers), return_exceptions=True)
+        results = await asyncio.gather(
+            *(p.terminate() for p in providers), return_exceptions=True
+        )
         failures = [result for result in results if isinstance(result, BaseException)]
         if failures:
             raise RuntimeError("部分 OAuth 提供商资源清理失败") from failures[0]
@@ -202,12 +212,18 @@ class OpenAICodexOAuthService:
 
     async def refresh(self, attempted_version: int | None = None) -> dict[str, Any]:
         self._require_open()
-        version = self.shared_state.version if attempted_version is None else attempted_version
+        version = (
+            self.shared_state.version
+            if attempted_version is None
+            else attempted_version
+        )
         async with self.shared_state.refresh_lock:
             self._require_open()
             if self.shared_state.version != version:
                 return self._current_token()
-            refresh_token_value = str(self.shared_state.snapshot().get("oauth_refresh_token") or "").strip()
+            refresh_token_value = str(
+                self.shared_state.snapshot().get("oauth_refresh_token") or ""
+            ).strip()
             if not refresh_token_value:
                 raise ValueError("当前配置没有可用的 refresh token")
             token = await refresh_access_token(refresh_token_value, self.get_proxy())
@@ -218,30 +234,35 @@ class OpenAICodexOAuthService:
 
     def _current_token(self) -> dict[str, Any]:
         state = self.shared_state.snapshot()
-        return {name: state.get(key, "") for name, key in (
-            ("access_token", "oauth_access_token"), ("refresh_token", "oauth_refresh_token"),
-            ("expires_at", "oauth_expires_at"), ("account_id", "oauth_account_id"),
-            ("email", "oauth_account_email"),
-        )}
+        return {
+            name: state.get(key, "")
+            for name, key in (
+                ("access_token", "oauth_access_token"),
+                ("refresh_token", "oauth_refresh_token"),
+                ("expires_at", "oauth_expires_at"),
+                ("account_id", "oauth_account_id"),
+                ("email", "oauth_account_email"),
+            )
+        }
 
-    async def persist_token(self, token: dict[str, Any], *, replace: bool = False) -> None:
+    async def persist_token(
+        self, token: dict[str, Any], *, replace: bool = False
+    ) -> None:
         self._require_open()
         previous = {} if replace else self._current_token()
         updates = {
             "auth_mode": "openai_oauth",
             "oauth_provider": "openai",
             "oauth_access_token": str(token.get("access_token") or ""),
-            "oauth_refresh_token": str(token.get("refresh_token") or previous.get("refresh_token") or ""),
+            "oauth_refresh_token": str(
+                token.get("refresh_token") or previous.get("refresh_token") or ""
+            ),
             "oauth_expires_at": str(token.get("expires_at") or ""),
             "oauth_account_email": str(
-                token.get("email")
-                or previous.get("email")
-                or ""
+                token.get("email") or previous.get("email") or ""
             ),
             "oauth_account_id": str(
-                token.get("account_id")
-                or previous.get("account_id")
-                or ""
+                token.get("account_id") or previous.get("account_id") or ""
             ),
         }
         for key, value in updates.items():
@@ -343,7 +364,9 @@ class OpenAICodexOAuthService:
             if event.get("type") == "response.completed":
                 response = event.get("response")
                 if isinstance(response, dict):
-                    return self._completed_test_result(response, "".join(output_text_parts))
+                    return self._completed_test_result(
+                        response, "".join(output_text_parts)
+                    )
         stripped = text.strip()
         if stripped.startswith("{"):
             try:
@@ -353,20 +376,29 @@ class OpenAICodexOAuthService:
             if isinstance(data, dict):
                 response = data.get("response") if data.get("response") else data
                 if isinstance(response, dict) and (
-                    data.get("type") == "response.completed" or response.get("status") == "completed"
+                    data.get("type") == "response.completed"
+                    or response.get("status") == "completed"
                 ):
-                    return self._completed_test_result(response, "".join(output_text_parts))
+                    return self._completed_test_result(
+                        response, "".join(output_text_parts)
+                    )
         raise ValueError("Codex backend 测试未完成：缺少 response.completed。")
 
     def _completed_test_result(self, response: dict, delta_text: str) -> dict[str, str]:
-        if response.get("error") or response.get("status", "completed") != "completed" or not response.get("id"):
+        if (
+            response.get("error")
+            or response.get("status", "completed") != "completed"
+            or not response.get("id")
+        ):
             raise ValueError("Codex backend 测试返回的完成响应无效。")
         text = str(response.get("output_text") or delta_text)
         if not text:
             text = "".join(
                 str(part.get("text") or "")
-                for item in response.get("output", []) if isinstance(item, dict)
-                for part in item.get("content", []) if isinstance(part, dict) and part.get("type") == "output_text"
+                for item in response.get("output", [])
+                if isinstance(item, dict)
+                for part in item.get("content", [])
+                if isinstance(part, dict) and part.get("type") == "output_text"
             )
         return {"response_id": str(response["id"]), "output_text": text}
 

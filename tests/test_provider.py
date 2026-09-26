@@ -244,8 +244,17 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
         self.assertEqual(
             list(capabilities)[:3],
-            ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"],
+            ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
         )
+        for model in ("gpt-6-sol", "gpt-6-luna"):
+            with self.subTest(model=model):
+                self.assertEqual(
+                    capabilities[model]["default_reasoning_effort"], "medium"
+                )
+                self.assertEqual(
+                    capabilities[model]["supported_reasoning_efforts"],
+                    ("none", "low", "medium", "high", "xhigh", "max"),
+                )
         self.assertEqual(
             capabilities["gpt-5.6-sol"]["default_reasoning_effort"],
             "low",
@@ -268,8 +277,8 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
         headers = provider._build_backend_headers()
 
-        self.assertEqual(headers["version"], "0.153.4")
-        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.153.4")
+        self.assertEqual(headers["version"], "0.158.0")
+        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.158.0")
         self.assertEqual(headers["x-openai-internal-codex-residency"], "us")
         self.assertEqual(headers["X-Plugin-Test"], "enabled")
 
@@ -411,15 +420,83 @@ class ProviderImageGenerationTests(unittest.TestCase):
     def test_query_rejects_ultra_for_single_provider_request(self):
         provider = self._make_provider("/tmp")
 
-        with self.assertRaisesRegex(ValueError, "ultra"):
+        for model in ("gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol"):
+            with self.subTest(model=model), self.assertRaisesRegex(ValueError, "ultra"):
+                self._run_query(
+                    provider,
+                    {"model": model, "messages": [], "reasoning_effort": "ultra"},
+                )
+
+    def test_gpt_6_sol_and_luna_reasoning_requests_reach_backend(self):
+        provider = self._make_provider("/tmp")
+
+        for model in ("gpt-6-sol", "gpt-6-luna"):
+            for effort in ("none", "low", "medium", "high", "xhigh", "max"):
+                with self.subTest(model=model, effort=effort):
+                    _, calls, _ = self._run_query(
+                        provider,
+                        {"model": model, "messages": [], "reasoning_effort": effort},
+                    )
+                    self.assertEqual(calls[0]["model"], model)
+                    self.assertEqual(calls[0]["reasoning"]["effort"], effort)
+
+        with self.assertRaisesRegex(ValueError, "gpt-6-astra.*none"):
             self._run_query(
                 provider,
-                {
-                    "model": "gpt-5.6-sol",
-                    "messages": [],
-                    "reasoning_effort": "ultra",
-                },
+                {"model": "gpt-6-astra", "messages": [], "reasoning_effort": "none"},
             )
+
+    def test_gpt_6_sol_and_luna_drop_sampling_for_reasoning_requests(self):
+        provider = self._make_provider("/tmp")
+        provider.provider_config["custom_extra_body"] = {
+            "top_p": 0.8,
+            "top_logprobs": 3,
+            "include": ["message.output_text.logprobs", "reasoning.encrypted_content"],
+        }
+
+        for model in ("gpt-6-sol", "gpt-6-luna"):
+            for effort in (None, "low"):
+                with self.subTest(model=model, effort=effort):
+                    payload = {"model": model, "messages": []}
+                    if effort:
+                        payload["reasoning_effort"] = effort
+                    _, calls, _ = self._run_query(provider, payload)
+                    params = calls[0]
+                    self.assertNotIn("top_p", params)
+                    self.assertNotIn("top_logprobs", params)
+                    self.assertEqual(params["include"], ["reasoning.encrypted_content"])
+
+        _, legacy_calls, _ = self._run_query(
+            provider,
+            {"model": "gpt-5.6-sol", "messages": [], "reasoning_effort": "low"},
+        )
+        self.assertEqual(legacy_calls[0]["top_p"], 0.8)
+        self.assertEqual(legacy_calls[0]["top_logprobs"], 3)
+        self.assertEqual(
+            legacy_calls[0]["include"],
+            ["message.output_text.logprobs", "reasoning.encrypted_content"],
+        )
+
+    def test_gpt_6_sol_and_luna_none_keeps_include_but_drops_sampling_fields(self):
+        provider = self._make_provider("/tmp")
+        provider.provider_config["custom_extra_body"] = {
+            "top_p": 0.8,
+            "top_logprobs": 3,
+            "include": ["message.output_text.logprobs", "reasoning.encrypted_content"],
+        }
+
+        for model in ("gpt-6-sol", "gpt-6-luna"):
+            with self.subTest(model=model):
+                _, calls, _ = self._run_query(
+                    provider,
+                    {"model": model, "messages": [], "reasoning_effort": "none"},
+                )
+                self.assertNotIn("top_p", calls[0])
+                self.assertNotIn("top_logprobs", calls[0])
+                self.assertEqual(
+                    calls[0]["include"],
+                    ["message.output_text.logprobs", "reasoning.encrypted_content"],
+                )
 
     def test_gpt_6_request_strips_unsupported_sampling_and_adds_live_search(self):
         provider = self._make_provider("/tmp")
@@ -430,7 +507,10 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 "custom_extra_body": {
                     "top_p": 0.8,
                     "top_logprobs": 3,
-                    "include": ["message.output_text.logprobs", "reasoning.encrypted_content"],
+                    "include": [
+                        "message.output_text.logprobs",
+                        "reasoning.encrypted_content",
+                    ],
                 },
             }
         )
@@ -449,19 +529,24 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 {
                     "type": "web_search",
                     "external_web_access": True,
-                    "filters": {
-                        "allowed_domains": ["example.com", "docs.example.com"]
-                    },
+                    "filters": {"allowed_domains": ["example.com", "docs.example.com"]},
                 }
             ],
         )
 
     def test_model_discovery_uses_plugin_model_list(self):
         from oauth_plug_openai_codex.service import OpenAICodexOAuthService
+
         provider = self._make_provider("/tmp")
-        service = OpenAICodexOAuthService({"runtime": {"models": "gpt-6-astra\ncustom-model"}})
-        with patch("oauth_plug_openai_codex.provider.get_service", return_value=service):
-            self.assertEqual(asyncio.run(provider.get_models()), ["gpt-6-astra", "custom-model"])
+        service = OpenAICodexOAuthService(
+            {"runtime": {"models": "gpt-6-astra\ncustom-model"}}
+        )
+        with patch(
+            "oauth_plug_openai_codex.provider.get_service", return_value=service
+        ):
+            self.assertEqual(
+                asyncio.run(provider.get_models()), ["gpt-6-astra", "custom-model"]
+            )
 
     def test_stream_event_yields_incremental_text(self):
         provider = self._make_provider("/tmp")
@@ -503,7 +588,9 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
         responses = asyncio.run(collect())
 
-        self.assertEqual([item.completion_text for item in responses], ["hel", "lo", "hello"])
+        self.assertEqual(
+            [item.completion_text for item in responses], ["hel", "lo", "hello"]
+        )
         self.assertEqual([item.is_chunk for item in responses], [True, True, False])
         self.assertEqual(responses[-1].id, "resp_stream")
 
@@ -979,9 +1066,7 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
         provider._request_image_backend_once = fake_request_image_backend_once
         provider._refresh_oauth_token = fake_refresh_oauth_token
 
-        response = asyncio.run(
-            provider._request_image_backend({"stream": True}, 75.25)
-        )
+        response = asyncio.run(provider._request_image_backend({"stream": True}, 75.25))
 
         self.assertEqual(
             calls,

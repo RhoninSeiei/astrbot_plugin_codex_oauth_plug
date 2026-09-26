@@ -4,7 +4,7 @@ from typing import Any
 
 from .oauth import decode_jwt_claims
 
-CODEX_CLIENT_VERSION = "0.153.4"
+CODEX_CLIENT_VERSION = "0.158.0"
 OPENAI_AUTH_CLAIM_PATH = "https://api.openai.com/auth"
 
 
