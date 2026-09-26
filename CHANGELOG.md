@@ -2,6 +2,11 @@
 
 ## 未发布
 
+- 增加 `/codex_oauth_usage` 直接查询命令及 `usage.provider_id` 固定查询目标，支持非 OAuth 聊天模型调用额度工具。
+
+- 增加 `codex_oauth_usage` 只读额度工具，支持内置和插件 OAuth 提供商、管理员权限、群会话白名单和短时缓存。
+- 增加 `runtime.tools_only` 模式，可仅启用额度工具并保留现有内置 OAuth 提供商。
+
 - 加入 GPT-6 Sol 和 Luna 模型，保留现有首选模型；OAuth 请求头版本更新至 `0.158.0`。
 - GPT-6 推理请求过滤不兼容的采样及 logprobs 参数，Sol 和 Luna 支持 `none` 至 `max`，Astra 保留原有推理限制。
 - 图片生成与参考图编辑增加可选 WebSocket 传输；默认 HTTP 和现有 `timeout` 接口保持不变，并修正默认图片目录的文档说明。

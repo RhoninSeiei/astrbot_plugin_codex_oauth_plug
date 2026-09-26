@@ -1,9 +1,38 @@
 {
+  "usage": {
+    "description": "额度查询工具",
+    "type": "object",
+    "items": {
+      "enabled": {
+        "description": "启用额度查询工具",
+        "type": "bool",
+        "default": true
+      },
+      "provider_id": {
+        "description": "额度查询目标提供商",
+        "type": "string",
+        "hint": "填写已有 Codex OAuth 模型提供商 ID。配置后任何聊天模型都可调用额度工具，斜杠命令也无需聊天模型。留空时使用当前会话提供商。",
+        "default": ""
+      },
+      "group_allowlist": {
+        "description": "允许查询的群会话",
+        "type": "list",
+        "hint": "填写完整 unified_msg_origin。默认只允许管理员私聊；群聊也必须由管理员查询。",
+        "default": []
+      }
+    }
+  },
   "runtime": {
     "description": "运行设置",
     "type": "object",
     "hint": "首次使用只需检查代理和模型列表，然后按 README 执行管理员授权命令。OAuth 凭据会自动填写。",
     "items": {
+      "tools_only": {
+        "description": "仅额度工具模式",
+        "type": "bool",
+        "hint": "使用内置 OAuth 时开启。仅提供额度工具，不注册插件提供商和授权接口；修改后重载生效。",
+        "default": false
+      },
       "enabled": {
         "description": "启用插件提供商",
         "type": "bool",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import json
 
 from quart import request
 
@@ -9,6 +10,9 @@ from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
 
 try:
+    from .oauth_plug_openai_codex.usage_format import format_usage
+    from .oauth_plug_openai_codex.quota import QuotaReader
+    from .oauth_plug_openai_codex.usage_tool import UsageToolService
     from .oauth_plug_openai_codex.registration import (
         register_provider_adapter,
         unregister_provider_adapter,
@@ -19,6 +23,9 @@ try:
         set_service,
     )
 except ImportError:
+    from oauth_plug_openai_codex.usage_format import format_usage
+    from oauth_plug_openai_codex.quota import QuotaReader
+    from oauth_plug_openai_codex.usage_tool import UsageToolService
     from oauth_plug_openai_codex.registration import (
         register_provider_adapter,
         unregister_provider_adapter,
@@ -37,8 +44,13 @@ class OAuthPlugOpenAICodexPlugin(Star):
         super().__init__(context, config)
         self.config = config or {}
         self.service = OpenAICodexOAuthService(self.config)
+        self.tools_only = self.config.get("runtime", {}).get("tools_only", False) is True
+        self.usage_service = UsageToolService(context, self.config, QuotaReader())
 
     async def initialize(self) -> None:
+        self._remove_owned_web_apis(include_previous_instances=True)
+        if self.tools_only:
+            return
         set_service(self.service)
         if self.service.is_enabled():
             register_provider_adapter()
@@ -75,19 +87,69 @@ class OAuthPlugOpenAICodexPlugin(Star):
 
     async def terminate(self) -> None:
         try:
-            await self.service.close()
+            try:
+                await self.usage_service.close()
+            finally:
+                await self.service.close()
         finally:
+            self._remove_owned_web_apis()
             if get_service() is self.service:
                 set_service(None)
                 unregister_provider_adapter()
 
+    def _remove_owned_web_apis(self, *, include_previous_instances=False) -> None:
+        routes = getattr(self.context, "registered_web_apis", None)
+        if not isinstance(routes, list):
+            return
+
+        def owned(item):
+            route, handler = item[0], item[1]
+            owner = getattr(handler, "__self__", None)
+            return (
+                route.startswith("oauth-plug-openai-codex/")
+                and owner is not None
+                and (
+                    owner is self
+                    or (
+                        include_previous_instances
+                        and type(owner).__module__ == type(self).__module__
+                        and type(owner).__name__ == type(self).__name__
+                    )
+                )
+            )
+
+        routes[:] = [item for item in routes if not owned(item)]
+
     def get_oauth_service(self) -> OpenAICodexOAuthService:
         return self.service
+
+    @filter.llm_tool(name="codex_oauth_usage")
+    async def codex_oauth_usage(self, event: AstrMessageEvent) -> str:
+        """查询已配置的 Codex OAuth 账号额度。仅用户明确询问额度时调用。
+
+        仅允许管理员私聊或白名单群聊，调用此工具的聊天模型不限厂商。
+        查询目标由管理员配置，不由模型选择。未配置时使用当前会话的 OAuth 提供商。
+        返回使用比例、剩余比例、额度窗口、重置时间和采集时间。
+        cached 表示短时缓存；缺失字段不是零，不推算剩余请求次数。
+        status 非 success 时说明查询状态，不编造额度。
+        """
+        return json.dumps(await self.usage_service.run(event), ensure_ascii=False)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("codex_oauth_usage")
+    async def command_usage(self, event: AstrMessageEvent):
+        """直接查询 Codex 额度，不调用聊天模型。"""
+        event.stop_event()
+        result = await self.usage_service.run(event)
+        yield event.plain_result(format_usage(result))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("codex_oauth_start")
     async def command_start(self, event: AstrMessageEvent):
         """生成 Codex OAuth 授权地址"""
+        if self.tools_only:
+            yield event.plain_result("当前为仅额度工具模式，账号授权由现有 OAuth 提供商管理。")
+            return
         flow = self._create_flow_and_save()
         yield event.plain_result(
             "Codex OAuth 授权地址已生成：\n"
@@ -100,6 +162,9 @@ class OAuthPlugOpenAICodexPlugin(Star):
     @filter.command("codex_oauth_complete")
     async def command_complete(self, event: AstrMessageEvent, auth_input: GreedyStr):
         """完成 Codex OAuth 绑定"""
+        if self.tools_only:
+            yield event.plain_result("当前为仅额度工具模式，账号授权由现有 OAuth 提供商管理。")
+            return
         try:
             token = await self.service.complete_flow(str(auth_input), "default")
         except Exception as exc:
@@ -119,6 +184,9 @@ class OAuthPlugOpenAICodexPlugin(Star):
     @filter.command("codex_oauth_refresh")
     async def command_refresh(self, event: AstrMessageEvent):
         """刷新 Codex OAuth token"""
+        if self.tools_only:
+            yield event.plain_result("当前为仅额度工具模式，账号授权由现有 OAuth 提供商管理。")
+            return
         try:
             token = await self.service.refresh()
         except Exception as exc:
@@ -134,6 +202,9 @@ class OAuthPlugOpenAICodexPlugin(Star):
     @filter.command("codex_oauth_test")
     async def command_test(self, event: AstrMessageEvent, model: str = ""):
         """测试 Codex OAuth provider 连接"""
+        if self.tools_only:
+            yield event.plain_result("当前为仅额度工具模式，账号授权由现有 OAuth 提供商管理。")
+            return
         try:
             result = await self.service.test_connection(model or None)
         except Exception as exc:

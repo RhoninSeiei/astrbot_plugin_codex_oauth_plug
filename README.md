@@ -130,10 +130,23 @@ oauth_plug_openai_codex_chat_completion
 | 令牌刷新失败或 `refresh_token_reused` | 重新授权，并避免多个服务共同刷新同一份授权凭据。 |
 | 模型测试成功，聊天仍使用其他模型 | 在 AstrBot 会话或默认模型设置中选择刚添加的插件提供商。 |
 
+## Codex 额度工具
+
+`/codex_oauth_usage` 是直接查询命令，不调用 LLM。`codex_oauth_usage` 同时也是供模型调用的只读工具，询问“Codex 额度还剩多少”可触发工具调用。两种入口均返回已用比例、剩余比例、窗口长度、重置时间和采集时间。
+
+在 `usage.provider_id` 填入已配置的 Codex OAuth 模型提供商 ID，例如 `openai_oauth/gpt-6-sol`，即可固定查询账号。此后命令无需聊天模型，工具也不限调用模型的厂商，只要求调用模型支持工具调用。查询额度属于目标 OAuth 账号，并不是调用模型自身的额度。兼容内置 `openai_oauth_chat_completion` 和本插件提供商；目标不存在或不是 OAuth 时明确报错，不自动改查其他账号。该设置留空时沿用当前会话的 OAuth 提供商。
+
+使用内置 OAuth 时，可启用本插件并设置 `runtime.tools_only=true`；此模式不注册插件提供商或授权 Web API，授权命令也不会执行。原有 OAuth 登录和聊天模型由内置提供商继续管理。修改此模式后需要重载插件。
+
+`usage.enabled` 控制命令与工具查询；默认仅管理员私聊可用。群聊需要在 `usage.group_allowlist` 填入完整 `unified_msg_origin`，并且查询者仍须为管理员。
+
+接口只访问官方额度地址，使用当前 OAuth 凭据和提供商代理，不发起模型推理、不刷新令牌。成功结果缓存 60 秒，按授权账号和令牌隔离；服务关闭时清空。缺失窗口或字段表示未知，不代表零，也不能换算为剩余请求次数。401、403、429、网络失败和解析失败分别返回查询状态，不返回原始响应、账号 ID 或凭据。
+
 ## 命令速查
 
 | 管理员命令 | 用途 |
 | --- | --- |
+| `/codex_oauth_usage` | 直接查询额度，不调用 LLM。 |
 | `/codex_oauth_start` | 获取新的授权链接。 |
 | `/codex_oauth_complete 授权输入` | 提交回调地址、`code#state` 或 JSON 凭据。 |
 | `/codex_oauth_test` | 测试默认模型。 |

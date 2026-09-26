@@ -27,6 +27,77 @@ except Exception:
 
 @unittest.skipUnless(ASTRBOT_AVAILABLE, "AstrBot runtime is not available")
 class AstrBotRegistrationTests(unittest.TestCase):
+    def test_quota_command_returns_text_without_llm_and_stops_event(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, Mock
+
+        async def check():
+            provider = SimpleNamespace(provider_config={"type":"openai_oauth_chat_completion"})
+            context = SimpleNamespace(get_provider_by_id=Mock(return_value=provider),get_using_provider_async=AsyncMock(side_effect=AssertionError("chat model must not be resolved")))
+            plugin = OAuthPlugOpenAICodexPlugin(context, {"runtime":{"tools_only":True},"usage":{"provider_id":"oauth/model"}})
+            plugin.usage_service.reader.read=AsyncMock(return_value={"status":"success","windows":[{"used_percent":61,"remaining_percent":39,"window_seconds":604800}]})
+            event=SimpleNamespace(is_admin=lambda:True,is_private_chat=lambda:True,unified_msg_origin="test:FriendMessage:1",plain_result=lambda value:value,stop_event=Mock())
+            results=[r async for r in plugin.command_usage(event)]
+            self.assertEqual(len(results),1)
+            self.assertIn("已用 61%，剩余 39%",results[0])
+            event.stop_event.assert_called_once()
+            context.get_using_provider_async.assert_not_awaited()
+            await plugin.terminate()
+
+        asyncio.run(check())
+
+    def test_tools_only_mode_does_not_register_provider_or_auth_routes(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from oauth_plug_openai_codex.service import get_service
+
+        async def check():
+            unregister_provider_adapter()
+            context = SimpleNamespace(register_web_api=Mock())
+            plugin = OAuthPlugOpenAICodexPlugin(context, {"runtime": {"tools_only": True}})
+            await plugin.initialize()
+            self.assertNotIn(PROVIDER_TYPE, provider_cls_map)
+            self.assertIsNot(get_service(), plugin.service)
+            context.register_web_api.assert_not_called()
+            for name, args in (("command_start", ()), ("command_complete", ("secret",)), ("command_refresh", ()), ("command_test", ())):
+                event = SimpleNamespace(plain_result=lambda value: value)
+                results = [r async for r in getattr(plugin, name)(event, *args)]
+                self.assertEqual(results, ["当前为仅额度工具模式，账号授权由现有 OAuth 提供商管理。"])
+            await plugin.terminate()
+            self.assertTrue(plugin.usage_service.closed)
+
+        asyncio.run(check())
+
+    def test_usage_tool_is_registered_with_no_model_supplied_account(self):
+        from astrbot.core.provider.register import llm_tools
+
+        tools = [t for t in llm_tools.func_list if t.name == "codex_oauth_usage"]
+        self.assertEqual(len(tools), 1)
+        self.assertEqual(tools[0].parameters.get("properties", {}), {})
+
+    def test_tools_only_removes_only_owned_stale_auth_routes(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        async def check():
+            context = SimpleNamespace(registered_web_apis=[])
+            old = OAuthPlugOpenAICodexPlugin(context, {})
+            unrelated = ("another-plugin/start", lambda: None, ["POST"], "other")
+            foreign = ("oauth-plug-openai-codex/start", lambda: None, ["POST"], "foreign")
+            context.registered_web_apis.extend([
+                ("oauth-plug-openai-codex/start", old.api_start, ["POST"], "owned"),
+                unrelated, foreign,
+            ])
+            plugin = OAuthPlugOpenAICodexPlugin(context, {"runtime": {"tools_only": True}})
+            await plugin.initialize()
+            self.assertEqual(context.registered_web_apis, [unrelated, foreign])
+            await plugin.terminate()
+            await old.terminate()
+
+        asyncio.run(check())
+
     def tearDown(self):
         unregister_provider_adapter()
         from oauth_plug_openai_codex.service import set_service
@@ -87,6 +158,7 @@ class AstrBotRegistrationTests(unittest.TestCase):
 
     def test_plugin_registers_admin_only_chat_commands(self):
         expected_commands = {
+            "codex_oauth_usage",
             "codex_oauth_start",
             "codex_oauth_complete",
             "codex_oauth_refresh",
