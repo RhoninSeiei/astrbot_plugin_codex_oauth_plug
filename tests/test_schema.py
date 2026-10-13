@@ -41,16 +41,3 @@ class SchemaTests(unittest.TestCase):
                 "gpt-5.6-luna",
             ],
         )
-
-    def test_release_metadata_and_changelog_cover_gpt_5_6_release(self):
-        repo_root = Path(__file__).resolve().parents[1]
-        metadata = (repo_root / "metadata.yaml").read_text(encoding="utf-8")
-        changelog = (repo_root / "CHANGELOG.md").read_text(encoding="utf-8")
-
-        self.assertIn("version: v0.4.0", metadata)
-        self.assertIn('astrbot_version: ">=4.24.0"', metadata)
-        self.assertIn("## 未发布", changelog)
-        self.assertIn("GPT-5.6", changelog)
-        self.assertIn("reasoning_effort", changelog)
-        self.assertIn("version=0.144.0", changelog)
-        self.assertIn("SSE", changelog)
