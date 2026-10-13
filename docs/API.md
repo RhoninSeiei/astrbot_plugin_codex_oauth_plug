@@ -78,12 +78,15 @@ images = await provider.generate_image(
     n=1,
     reference_images=reference_images,
     timeout=180.0,
+    image_model="gpt-image-2.5-flare",  # 可选的实验性图片模型请求
 )
 for image in images:
     print(image.path, image.mime_type)
 ```
 
 - `reference_images` 支持本地路径、`file://`、HTTP 图片 URL 和 `data:image/...`。
+- `model` 是 Responses 主控聊天模型；`image_model` 是 `image_generation` 工具的实验性模型请求，支持 `gpt-image-2`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`。服务端可能忽略该字段，不能将其视为实际图片模型的选择保证。
+- `image_model=None` 或省略时继承 `oauth_image_model` 配置；`image_model=""` 显式取消指定，即使配置中设有图片模型也不发送工具的 `model` 字段。仅可用关键字传入，兼容原有位置参数调用。
 - 有参考图时默认 `action=edit`，无参考图时默认 `action=generate`，也可显式传入 `action`。
 - `timeout` 为本次图片请求的超时秒数；省略或为 `None` 时使用提供商默认值，不修改其他调用的超时。
 - `transport="http"` 为默认的历史接口；可在调用方确认 `image_websocket` 能力后传入 `transport="websocket"`。WebSocket 的 `timeout` 覆盖令牌刷新、连接、发送与接收的总时长。

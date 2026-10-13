@@ -21,6 +21,7 @@ DEFAULT_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_MODELS = (
     DEFAULT_MODEL,
+    "gpt-6.1-sol",
     "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
@@ -164,6 +165,7 @@ class OpenAICodexOAuthService:
             "oauth_refresh_skew_seconds", "runtime", 300
         )
         for key, default in (
+            ("oauth_image_model", ""),
             ("oauth_web_search", "disabled"),
             ("oauth_web_search_domains", []),
             ("oauth_audio_transcription", False),

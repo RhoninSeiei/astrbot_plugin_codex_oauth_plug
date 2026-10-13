@@ -36,6 +36,7 @@ from .provider_runtime_compat import (
     db_helper,
     provider_oauth_web_search,
     provider_stats_managed_by_agent,
+    record_provider_usage,
     retry_provider_request,
 )
 
@@ -49,6 +50,9 @@ oauth_provider_stat_kind: ContextVar[str] = ContextVar(
 IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 IMAGE_WEBSOCKET_MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
 IMAGE_WEBSOCKET_MAX_EVENTS = 16384
+OAUTH_IMAGE_MODEL_ALIASES = frozenset(
+    {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
+)
 
 
 class OpenAIOAuthImageStreamError(RuntimeError):
@@ -87,6 +91,16 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         "image_websocket": True,
     }
     model_capabilities = {
+        "gpt-6.1-sol": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": (
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max",
+            ),
+        },
         "gpt-6-astra": {
             "default_reasoning_effort": "medium",
             "supported_reasoning_efforts": (
@@ -1028,6 +1042,15 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
     def _extract_response_usage(self, usage: Any) -> TokenUsage | None:
         if usage is None:
             return None
+        getter = (
+            usage.get
+            if isinstance(usage, dict)
+            else lambda key: getattr(usage, key, None)
+        )
+        known_input = getter("input_tokens") is not None
+        known_output = getter("output_tokens") is not None
+        if not known_input and not known_output:
+            return None
         if isinstance(usage, dict):
             input_tokens = int(usage.get("input_tokens", 0) or 0)
             output_tokens = int(usage.get("output_tokens", 0) or 0)
@@ -1038,11 +1061,18 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
             details = getattr(usage, "input_tokens_details", None)
             cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
-        return TokenUsage(
-            input_other=max(0, input_tokens - cached_tokens),
-            input_cached=cached_tokens,
-            output=output_tokens,
-        )
+        values = {
+            "input_other": max(0, input_tokens - cached_tokens),
+            "input_cached": cached_tokens,
+            "output": output_tokens,
+        }
+        try:
+            return TokenUsage(
+                **values,
+                is_partial=not (known_input and known_output),
+            )
+        except TypeError:
+            return TokenUsage(**values)
 
     async def _record_provider_stat(
         self,
@@ -1066,6 +1096,19 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             model: Explicit request model when supplied.
             session_id: Session identifier when supplied by the caller.
         """
+        if getattr(self, "_usage_recording_enabled", False):
+            recorded = await record_provider_usage(
+                self,
+                self._usage_recording_db,
+                usage=usage,
+                status=status,
+                start_time=start_time,
+                end_time=end_time,
+                request_kind=request_kind,
+                model=model,
+            )
+            if recorded:
+                return
         try:
             if db_helper is None:
                 return
@@ -1332,15 +1375,16 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         params.pop("max_output_tokens", None)
         params.pop("temperature", None)
         model_name = str(params.get("model") or "").strip().lower()
-        is_gpt_6 = model_name.startswith("gpt-6-astra") or model_name in {
-            "gpt-6-sol",
-            "gpt-6-luna",
-        }
-        if is_gpt_6:
+        if model_name.startswith(
+            ("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+        ):
             params.pop("top_p", None)
             params.pop("top_logprobs", None)
-        strips_reasoning_sampling = model_name.startswith("gpt-6-astra") or (
-            is_gpt_6 and reasoning.get("effort", "medium") != "none"
+        strips_reasoning_sampling = model_name.startswith(
+            ("gpt-6.1-sol", "gpt-6-astra")
+        ) or (
+            model_name.startswith(("gpt-6-sol", "gpt-6-luna"))
+            and reasoning.get("effort") != "none"
         )
         if strips_reasoning_sampling:
             include = params.get("include")
@@ -1879,18 +1923,22 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         action: str | None = None,
         timeout: float | None = None,
         transport: str = "http",
+        *,
+        image_model: str | None = None,
     ) -> list[OAuthPlugImageResult]:
         """Generate images and persist aggregate OAuth token usage.
 
         Args:
             prompt: Image generation or editing instruction.
-            model: Explicit model override.
+            model: Main Responses controller model, not the image model.
             size: Requested image dimensions.
             n: Number of backend image generations.
             reference_images: Local files, URLs, or data URLs used as references.
             action: Image tool action override.
             timeout: Optional per-image deadline, including the whole HTTP request.
             transport: Image transport, either HTTP or WebSocket.
+            image_model: Experimental image tool model. None inherits the source
+                setting; an empty string explicitly omits the tool model.
 
         Returns:
             Extracted image results from all backend generations.
@@ -1912,6 +1960,20 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 raise ValueError("timeout 必须是有限正浮点数。") from exc
             if not math.isfinite(request_timeout) or request_timeout <= 0:
                 raise ValueError("timeout 必须是有限正浮点数。")
+        selected_image_model = (
+            self.provider_config.get("oauth_image_model", "")
+            if image_model is None
+            else image_model
+        )
+        if selected_image_model is None:
+            selected_image_model = ""
+        if not isinstance(selected_image_model, str):
+            raise ValueError("图片模型选择无效。")
+        if selected_image_model.strip():
+            if selected_image_model not in OAUTH_IMAGE_MODEL_ALIASES:
+                raise ValueError("图片模型选择无效。")
+        else:
+            selected_image_model = ""
 
         start_time = time.time()
         total_usage = TokenUsage()
@@ -1937,6 +1999,8 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 }
                 if size:
                     tool["size"] = size
+                if selected_image_model:
+                    tool["model"] = selected_image_model
                 payload = {
                     "model": model or self.get_model(),
                     "input": image_input,
@@ -1946,42 +2010,67 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     "stream": True,
                     "store": False,
                 }
-                if transport == "websocket":
-                    response = await self._request_image_backend_websocket(
-                        payload, timeout=request_timeout
+                image_start = time.time()
+                response_usage = None
+                image_status = "completed"
+                response: dict[str, Any] = {}
+                try:
+                    if transport == "websocket":
+                        response = await self._request_image_backend_websocket(
+                            payload, timeout=request_timeout
+                        )
+                    elif explicit_timeout:
+                        response = await asyncio.wait_for(
+                            self._request_image_backend(payload, request_timeout),
+                            timeout=request_timeout,
+                        )
+                    else:
+                        response = await self._request_image_backend(
+                            payload, request_timeout
+                        )
+                    response_usage = self._extract_response_usage(
+                        response.get("usage")
                     )
-                elif explicit_timeout:
-                    response = await asyncio.wait_for(
-                        self._request_image_backend(payload, request_timeout),
-                        timeout=request_timeout,
-                    )
-                else:
-                    response = await self._request_image_backend(
-                        payload, request_timeout
-                    )
-                response_usage = self._extract_response_usage(response.get("usage"))
-                if response_usage is not None:
-                    total_usage = total_usage + response_usage
-                results.extend(await self._extract_generated_images(response))
+                    if response_usage is not None:
+                        total_usage = total_usage + response_usage
+                    results.extend(await self._extract_generated_images(response))
+                except asyncio.CancelledError:
+                    image_status = "aborted"
+                    raise
+                except Exception:
+                    image_status = "error"
+                    raise
+                finally:
+                    if getattr(self, "_usage_recording_enabled", False):
+                        await self._record_provider_stat(
+                            request_kind="image",
+                            status=image_status,
+                            usage=response_usage,
+                            start_time=image_start,
+                            end_time=time.time(),
+                            model=response.get("model") or model,
+                        )
         except (Exception, asyncio.CancelledError):
+            if not getattr(self, "_usage_recording_enabled", False):
+                await self._record_provider_stat(
+                    request_kind="image",
+                    status="error",
+                    usage=total_usage,
+                    start_time=start_time,
+                    end_time=time.time(),
+                    model=model,
+                )
+            raise
+
+        if not getattr(self, "_usage_recording_enabled", False):
             await self._record_provider_stat(
                 request_kind="image",
-                status="error",
+                status="completed",
                 usage=total_usage,
                 start_time=start_time,
                 end_time=time.time(),
                 model=model,
             )
-            raise
-
-        await self._record_provider_stat(
-            request_kind="image",
-            status="completed",
-            usage=total_usage,
-            start_time=start_time,
-            end_time=time.time(),
-            model=model,
-        )
         return results
 
     def _build_image_generation_input(

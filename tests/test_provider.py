@@ -243,8 +243,8 @@ class ProviderImageGenerationTests(unittest.TestCase):
         capabilities = ProviderOAuthPlugOpenAICodex.model_capabilities
 
         self.assertEqual(
-            list(capabilities)[:3],
-            ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+            list(capabilities)[:4],
+            ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
         )
         for model in ("gpt-6-sol", "gpt-6-luna"):
             with self.subTest(model=model):
@@ -277,8 +277,8 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
         headers = provider._build_backend_headers()
 
-        self.assertEqual(headers["version"], "0.158.0")
-        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.158.0")
+        self.assertEqual(headers["version"], "0.159.2")
+        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.159.2")
         self.assertEqual(headers["x-openai-internal-codex-residency"], "us")
         self.assertEqual(headers["X-Plugin-Test"], "enabled")
 

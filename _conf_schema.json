@@ -53,7 +53,7 @@
         "description": "模型列表",
         "type": "text",
         "hint": "每行填写一个模型 ID，首行作为默认模型。示例：gpt-5.6-sol。",
-        "default": "gpt-5.6-sol\ngpt-6-astra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-terra\ngpt-5.6-luna"
+        "default": "gpt-5.6-sol\ngpt-6.1-sol\ngpt-6-astra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-terra\ngpt-5.6-luna"
       },
       "oauth_refresh_skew_seconds": {
         "description": "提前刷新秒数",
@@ -136,6 +136,18 @@
         "description": "音频转录模型",
         "type": "string",
         "default": "gpt-4o-transcribe"
+      },
+      "oauth_image_model": {
+        "description": "实验性图片模型",
+        "type": "string",
+        "default": "",
+        "options": [
+          "",
+          "gpt-image-2",
+          "gpt-image-2.5-flare",
+          "gpt-image-2.5-sunburst"
+        ],
+        "hint": "留空使用服务端默认值。仅写入 image_generation 工具的 model，不改变主控聊天模型；服务端可能忽略此请求，无法据此确认实际使用的图片模型。"
       }
     }
   }

@@ -86,6 +86,7 @@ oauth_plug_openai_codex_chat_completion
 
 | 模型 ID | 可用推理强度 |
 | --- | --- |
+| `gpt-6.1-sol` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6-astra` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6-sol` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6-luna` | 同上 |
@@ -94,6 +95,8 @@ oauth_plug_openai_codex_chat_completion
 | `gpt-5.6-luna` | 同上 |
 
 模型是否实际可用取决于账号权限和服务端支持。旧模型及自定义模型 ID 仍可填写。
+
+从旧版本升级时，已经保存的模型列表和首选模型保持不变。如需使用 `gpt-6.1-sol`，在插件配置的“模型列表”中增加一行，再到模型提供商页面获取模型列表。上方截图采集于 v0.3.0，因此不包含后来新增的模型。
 
 已有 AstrBot 内建 OAuth 时，注意选择带插件名称的类型；内建 `openai_oauth_chat_completion` 与本插件分别管理授权。
 
@@ -111,7 +114,7 @@ oauth_plug_openai_codex_chat_completion
 }
 ```
 
-不填写时由服务端决定默认强度。`off` 按 `none` 处理，GPT-6 Astra 不接受 `none`；单次模型请求不接受 `ultra`。
+不填写时由服务端决定默认强度。`off` 按 `none` 处理，GPT-6.1 Sol 和 GPT-6 Astra 不接受 `none`；单次模型请求不接受 `ultra`。
 
 ### 联网搜索
 
@@ -128,6 +131,8 @@ oauth_plug_openai_codex_chat_completion
 ### 图片与音频
 
 图片生成和参考图编辑通过其他插件调用 `generate_image()` 使用，不会自动增加生图聊天命令。
+
+高级设置增加“实验性图片模型”，可请求 `gpt-image-2`、`gpt-image-2.5-flare` 或 `gpt-image-2.5-sunburst`，留空使用服务端默认值。该选项仅影响图片工具，不改变主控聊天模型；服务端可能忽略指定值，不能据此确认实际采用的图片模型。
 该接口默认使用 HTTP；需要图片 WebSocket 流时可传入 `transport="websocket"`，并通过 `image_websocket` 能力标记判断是否可用。
 
 音频转录默认关闭。只有账号具备转录权限时才启用；也可继续使用 AstrBot 自身的语音转文字提供商。实时音频接口供插件开发者使用，需要调用方处理 WebRTC 音频连接，不是开箱即用的语音聊天页面。

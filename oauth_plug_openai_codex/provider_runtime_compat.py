@@ -63,3 +63,13 @@ async def retry_provider_request(
     if "retry_rate_limits" in parameters:
         kwargs["retry_rate_limits"] = retry_rate_limits
     return await retry_impl(provider_label, request_factory, **kwargs)
+
+
+async def record_provider_usage(provider, db, **kwargs) -> bool:
+    """Record through the new core ledger when that API is available."""
+    try:
+        from astrbot.core.provider.usage_recorder import record_usage
+    except ImportError:
+        return False
+    await record_usage(provider, db, **kwargs)
+    return True
