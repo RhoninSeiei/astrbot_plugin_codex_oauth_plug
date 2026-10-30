@@ -48,6 +48,7 @@ oauth_provider_stat_kind: ContextVar[str] = ContextVar(
     default="text",
 )
 IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
+IMAGE_WEBSOCKET_MAX_REQUEST_BYTES = 8 * 1024 * 1024
 IMAGE_WEBSOCKET_MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
 IMAGE_WEBSOCKET_MAX_EVENTS = 16384
 OAUTH_IMAGE_MODEL_ALIASES = frozenset(
@@ -666,6 +667,25 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         scheme = "wss" if base.scheme == "https" else "ws"
         url = f"{scheme}://{base.netloc}{base.path.rstrip('/')}/responses"
         submitted = False
+        started = time.monotonic()
+        diagnostic = {"trace_id": uuid.uuid4().hex, "phase": "prepare", "outcome": "failure",
+                      "request_bytes": 0, "received_bytes": 0, "events": 0,
+                      "close_code": None, "socket_exception": "", "last_event": "",
+                      "exception_type": "", "reason_code": "", "error_code": ""}
+        websocket = None
+
+        def observe_socket():
+            if websocket is None:
+                return
+            diagnostic["close_code"] = getattr(websocket, "close_code", None)
+            getter = getattr(websocket, "exception", None)
+            error = getter() if callable(getter) else None
+            if error is not None:
+                diagnostic["socket_exception"] = type(error).__name__
+                code = getattr(error, "code", None)
+                if isinstance(code, int):
+                    diagnostic["close_code"] = code
+
 
         async def reject_redirect(_session, _context, params):
             raise OpenAIOAuthImageStreamError(
@@ -699,6 +719,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                             )
                             if getattr(self, "_oauth_media_closed", False):
                                 raise OpenAIOAuthImageStreamError("provider_closed")
+                            diagnostic["phase"] = "handshake"
                             websocket = await resources.enter_async_context(
                                 session.ws_connect(
                                     url,
@@ -715,14 +736,22 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                                 for key, value in payload.items()
                                 if key not in {"stream", "background"}
                             }
+                            request = {"type": "response.create", **request}
+                            diagnostic["request_bytes"] = len(json.dumps(request).encode("utf-8"))
+                            diagnostic["phase"] = "preflight"
+                            if diagnostic["request_bytes"] > IMAGE_WEBSOCKET_MAX_REQUEST_BYTES:
+                                diagnostic["error_code"] = "payload_too_large"
+                                raise OpenAIOAuthImageStreamError("request_rejected", status_code=413)
+                            diagnostic["phase"] = "send"
                             submitted = True
-                            await websocket.send_json(
-                                {"type": "response.create", **request}
-                            )
+                            await websocket.send_json(request)
+                            diagnostic["phase"] = "receive"
                             lines: list[str] = []
                             received_bytes = 0
                             async for message in websocket:
                                 if message.type != aiohttp.WSMsgType.TEXT:
+                                    observe_socket()
+                                    diagnostic["last_event"] = str(message.type)[:48]
                                     raise OpenAIOAuthImageStreamError("outcome_unknown")
                                 received_bytes += len(message.data.encode("utf-8"))
                                 if (
@@ -736,12 +765,24 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                                     raise OpenAIOAuthImageStreamError("outcome_unknown")
                                 lines.append("data: " + message.data)
                                 event_type = event.get("type")
+                                diagnostic["received_bytes"] = received_bytes
+                                diagnostic["events"] = len(lines)
+                                # Only record protocol event identifiers, never payloads.
+                                diagnostic["last_event"] = event_type if event_type in {
+                                    "error", "response.error", "response.failed", "response.incomplete",
+                                    "response.created", "response.in_progress", "response.completed",
+                                    "response.output_item.done", "response.output_item.added",
+                                } else "other"
                                 if event_type in {
                                     "error",
                                     "response.error",
                                     "response.failed",
                                     "response.incomplete",
                                 }:
+                                    error_body = event.get("error") or (event.get("response") or {}).get("error") or {}
+                                    code = error_body.get("code") if isinstance(error_body, dict) else None
+                                    known_codes = {"payload_too_large", "request_too_large", "message_too_large", "image_too_large", "invalid_request_error", "rate_limit_exceeded", "server_error", "context_length_exceeded"}
+                                    diagnostic["error_code"] = code if isinstance(code, str) and code in known_codes else "other"
                                     status = self._extract_stream_error_status_code(
                                         event
                                     )
@@ -756,9 +797,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                                         reason, status_code=status
                                     )
                                 if event_type == "response.completed":
-                                    return self._parse_backend_response(
-                                        "\n".join(lines)
-                                    )
+                                    parsed = self._parse_backend_response("\n".join(lines))
+                                    diagnostic["outcome"] = "success"
+                                    return parsed
+                            observe_socket()
                             raise OpenAIOAuthImageStreamError("outcome_unknown")
                     except aiohttp.WSServerHandshakeError as error:
                         if error.status == 401 and auth_attempt == 0:
@@ -779,23 +821,31 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     finally:
                         self._oauth_stream_clients.discard(resources)
         except asyncio.CancelledError:
+            diagnostic.update(outcome="cancelled", exception_type="CancelledError")
             raise
-        except OpenAIOAuthImageStreamError:
+        except OpenAIOAuthImageStreamError as error:
+            diagnostic.update(exception_type=type(error).__name__, reason_code=error.reason_code, http_status=error.status_code)
             raise
         except TimeoutError:
+            diagnostic["exception_type"] = "TimeoutError"
             raise OpenAIOAuthImageStreamError(
                 "outcome_unknown" if submitted else "timeout",
                 retryable=not submitted,
             ) from None
-        except (aiohttp.ClientError, OSError):
+        except (aiohttp.ClientError, OSError) as error:
+            diagnostic["exception_type"] = type(error).__name__
             raise OpenAIOAuthImageStreamError(
                 "outcome_unknown" if submitted else "connection_failed",
                 retryable=not submitted,
             ) from None
-        except Exception:
+        except Exception as error:
+            diagnostic["exception_type"] = type(error).__name__
             raise OpenAIOAuthImageStreamError(
                 "outcome_unknown" if submitted else "provider_failed",
             ) from None
+        finally:
+            diagnostic.update(submitted=submitted, elapsed_ms=round((time.monotonic() - started) * 1000))
+            logger.info("CODEX_IMAGE_WS_DIAGNOSTIC " + json.dumps(diagnostic, ensure_ascii=True))
         raise OpenAIOAuthImageStreamError("request_rejected")
 
     def _format_backend_error(self, status_code: int, text: str) -> str:

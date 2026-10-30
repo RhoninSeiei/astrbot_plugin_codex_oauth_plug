@@ -436,3 +436,50 @@ class ImageWebSocketTests(unittest.IsolatedAsyncioTestCase):
                 await provider.generate_image(
                     "cat", transport="websocket", timeout=timeout
                 )
+
+class ImageWebSocketDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    make_provider = ImageWebSocketTests.make_provider
+    noop = ImageWebSocketTests.noop
+
+    async def test_close_codes_size_and_no_replay_without_secrets(self):
+        import oauth_plug_openai_codex.provider as source
+        for code in (1009, 1006):
+            provider=self.make_provider();socket=Socket();socket.close_code=code
+            logs=[]
+            with patch.dict(sys.modules, {'aiohttp':FakeAiohttp([Session(socket)])}), patch.object(source.logger,'info',side_effect=lambda text:logs.append(text)):
+                with self.assertRaises(source.OpenAIOAuthImageStreamError) as raised:
+                    await provider.generate_image('private-prompt-marker',transport='websocket')
+            self.assertEqual(raised.exception.reason_code,'outcome_unknown')
+            self.assertFalse(raised.exception.retryable);self.assertEqual(len(socket.sent),1)
+            diagnostic=json.loads(next(x.split('CODEX_IMAGE_WS_DIAGNOSTIC ',1)[1] for x in logs if x.startswith('CODEX_IMAGE_WS_DIAGNOSTIC ')))
+            self.assertEqual(diagnostic['close_code'],code)
+            self.assertEqual(diagnostic['request_bytes'],len(json.dumps(socket.sent[0]).encode()))
+            self.assertEqual(diagnostic['phase'],'receive')
+            self.assertNotIn('private-prompt-marker',str(logs));self.assertNotIn('test-token',str(logs))
+
+    async def test_success_and_upstream_size_error_are_distinct(self):
+        import oauth_plug_openai_codex.provider as source
+        for events,expected in [(image_events(),'success'),([{'type':'error','error':{'code':'payload_too_large','message':'secret marker'}}],'failure')]:
+            p=self.make_provider();socket=Socket(events);logs=[]
+            async def extract(response):return ['image-result']
+            p._extract_generated_images=extract
+            with patch.dict(sys.modules,{'aiohttp':FakeAiohttp([Session(socket)])}),patch.object(source.logger,'info',side_effect=lambda text:logs.append(text)):
+                if expected=='success':await p.generate_image('cat',transport='websocket')
+                else:
+                    with self.assertRaises(source.OpenAIOAuthImageStreamError):await p.generate_image('cat',transport='websocket')
+            d=json.loads(next(x.split('CODEX_IMAGE_WS_DIAGNOSTIC ',1)[1] for x in logs if x.startswith('CODEX_IMAGE_WS_DIAGNOSTIC ')))
+            self.assertEqual(d['outcome'],expected);self.assertEqual(len(socket.sent),1)
+            if expected=='failure':self.assertEqual(d['error_code'],'payload_too_large')
+            self.assertNotIn('secret marker',str(logs))
+
+    async def test_oversized_request_is_rejected_without_submission(self):
+        import oauth_plug_openai_codex.provider as source
+        p=self.make_provider();socket=Socket();logs=[]
+        with patch.dict(sys.modules,{'aiohttp':FakeAiohttp([Session(socket)])}),patch.object(source,'IMAGE_WEBSOCKET_MAX_REQUEST_BYTES',100),patch.object(source.logger,'info',side_effect=lambda text:logs.append(text)):
+            with self.assertRaises(source.OpenAIOAuthImageStreamError) as raised:
+                await p.generate_image('cat',transport='websocket')
+        self.assertEqual(raised.exception.status_code,413)
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(socket.sent,[])
+        d=json.loads(next(x.split('CODEX_IMAGE_WS_DIAGNOSTIC ',1)[1] for x in logs if x.startswith('CODEX_IMAGE_WS_DIAGNOSTIC ')))
+        self.assertFalse(d['submitted']);self.assertEqual(d['error_code'],'payload_too_large')
