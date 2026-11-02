@@ -1688,6 +1688,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         request_max_retries: int | None = None,
         retry_rate_limits: bool | None = None,
         oauth_web_search: str | None = None,
+        conversation_id: str | None = None,
     ) -> LLMResponse:
         if retry_rate_limits is None:
             retry_rate_limits = payloads.get("_oauth_retry_rate_limits")
@@ -1722,6 +1723,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         request_max_retries: int | None = None,
         retry_rate_limits: bool | None = None,
         oauth_web_search: str | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncGenerator[LLMResponse, None]:
         del request_max_retries, retry_rate_limits
         params = self._build_responses_params(

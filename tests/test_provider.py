@@ -209,7 +209,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
         provider._oauth_refresh_lock = asyncio.Lock()
         return provider
 
-    def _run_query(self, provider, payloads, request_max_retries=None):
+    def _run_query(self, provider, payloads, request_max_retries=None, **query_kwargs):
         calls = []
         retries = []
 
@@ -235,9 +235,21 @@ class ProviderImageGenerationTests(unittest.TestCase):
                     payloads,
                     None,
                     request_max_retries=request_max_retries,
+                    **query_kwargs,
                 )
             )
         return result, calls, retries
+
+    def test_query_accepts_astrbot_conversation_id(self):
+        provider = self._make_provider("/tmp")
+        result, calls, _ = self._run_query(
+            provider,
+            {"model": "gpt-6.1-sol", "messages": []},
+            conversation_id="astrbot-test-conversation",
+        )
+        self.assertEqual(result["id"], "resp_test")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("conversation_id", calls[0])
 
     def test_provider_advertises_gpt_6_and_gpt_5_6_models(self):
         capabilities = ProviderOAuthPlugOpenAICodex.model_capabilities
@@ -583,6 +595,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 async for response in provider._query_stream(
                     {"model": "gpt-6-astra", "messages": []},
                     None,
+                    conversation_id="astrbot-stream-test-conversation",
                 )
             ]
 
