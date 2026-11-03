@@ -798,17 +798,36 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             ) from None
         raise OpenAIOAuthImageStreamError("request_rejected")
 
+    @staticmethod
+    def _compact_backend_error(data: Any) -> str:
+        if not isinstance(data, dict):
+            return str(data)[:300]
+        response = data.get("response")
+        payload = response if isinstance(response, dict) else data
+        error = payload.get("error")
+        error = error if isinstance(error, dict) else {}
+        values = (
+            error.get("message"),
+            payload.get("message"),
+            error.get("code"),
+            payload.get("code"),
+            error.get("type"),
+            payload.get("type"),
+        )
+        parts = [str(value) for value in values if value is not None and value != ""]
+        return "; ".join(dict.fromkeys(parts))[:300] or "Unknown backend error"
+
     def _format_backend_error(self, status_code: int, text: str) -> str:
         stripped = text.strip()
         if not stripped:
             return f"Codex backend request failed: status={status_code}"
         try:
             data = json.loads(stripped)
-            return f"Codex backend request failed: status={status_code}, body={data}"
         except Exception:
-            return (
-                f"Codex backend request failed: status={status_code}, body={stripped}"
-            )
+            summary = stripped[:300]
+        else:
+            summary = self._compact_backend_error(data)
+        return f"Codex backend request failed: status={status_code}, body={summary}"
 
     def _parse_backend_response(self, text: str) -> dict[str, Any]:
         completed_response: dict[str, Any] | None = None
@@ -817,6 +836,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         output_text_done: str | None = None
         output_items: list[dict[str, Any]] = []
         output_item_ids: set[str] = set()
+        malformed_data_lines = 0
         for line in text.splitlines():
             line = line.strip()
             if not line or not line.startswith("data:"):
@@ -827,6 +847,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             try:
                 event = json.loads(raw)
             except Exception:
+                malformed_data_lines += 1
                 continue
             if not isinstance(event, dict):
                 continue
@@ -860,6 +881,11 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     completed_response = response
                 else:
                     completed_response = event
+        if malformed_data_lines:
+            logger.warning(
+                "Codex backend SSE: skipped %d malformed data lines",
+                malformed_data_lines,
+            )
         merged_output_text = (
             output_text_done
             if output_text_done is not None
@@ -873,7 +899,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             return completed_response
         if error_payload:
             status_code = self._extract_stream_error_status_code(error_payload)
-            message = f"Codex backend returned error event: {error_payload}"
+            message = (
+                "Codex backend returned error event: "
+                f"{self._compact_backend_error(error_payload)}"
+            )
             if status_code is not None:
                 raise ProviderRequestError(message, status_code=status_code)
             raise RuntimeError(message)
@@ -888,7 +917,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     "response.incomplete",
                 }:
                     status_code = self._extract_stream_error_status_code(data)
-                    message = f"Codex backend returned error event: {data}"
+                    message = (
+                        "Codex backend returned error event: "
+                        f"{self._compact_backend_error(data)}"
+                    )
                     if status_code is not None:
                         raise ProviderRequestError(
                             message,
@@ -1274,6 +1306,20 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             "stream": True,
             "store": False,
         }
+        response_format = payloads.get("response_format")
+        if isinstance(response_format, dict):
+            format_type = str(response_format.get("type") or "").strip().lower()
+            if format_type == "json_object":
+                params["text"] = {"format": {"type": "json_object"}}
+            elif format_type == "json_schema":
+                merged_format: dict[str, Any] = {"type": "json_schema"}
+                schema_body = response_format.get("json_schema")
+                if isinstance(schema_body, dict):
+                    merged_format.update(schema_body)
+                params["text"] = {"format": merged_format}
+            elif format_type == "text":
+                params["text"] = {"format": {"type": "text"}}
+
         function_tools: list[dict[str, Any]] = []
         if tools:
             tool_list = tools.get_func_desc_openai_style(
@@ -1447,7 +1493,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         else:
             output_text = (getattr(response, "output_text", None) or "").strip()
         output_items = list(
-            response.get("output", [])
+            response.get("output", []) or []
             if isinstance(response, dict)
             else getattr(response, "output", []) or []
         )
@@ -1490,8 +1536,21 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                         else arguments
                     )
                 except Exception:
-                    parsed_args = {}
-                tool_args.append(parsed_args if isinstance(parsed_args, dict) else {})
+                    parsed_args = {"_raw_arguments": arguments}
+                    logger.warning(
+                        "Codex tool %s: invalid JSON arguments (raw length=%d)",
+                        item.get("name", "")
+                        if isinstance(item, dict)
+                        else getattr(item, "name", ""),
+                        len(arguments),
+                    )
+                if not isinstance(parsed_args, dict):
+                    parsed_args = (
+                        {"_raw_arguments": arguments}
+                        if isinstance(arguments, str)
+                        else {"_value": parsed_args}
+                    )
+                tool_args.append(parsed_args)
                 tool_names.append(
                     str(
                         item.get("name", "")
@@ -1519,12 +1578,18 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                         if isinstance(content, dict)
                         else getattr(content, "type", None)
                     )
-                    if ctype in {"output_text", "text"}:
+                    if ctype in {"output_text", "text", "refusal"}:
                         text = (
                             content.get("text")
                             if isinstance(content, dict)
                             else getattr(content, "text", None)
                         )
+                        if ctype == "refusal":
+                            text = (
+                                content.get("refusal", text)
+                                if isinstance(content, dict)
+                                else getattr(content, "refusal", text)
+                            )
                         if text:
                             item_text_parts.append(str(text))
                 if item_text_parts:
@@ -1551,15 +1616,46 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             llm_response.tools_call_name = tool_names
             llm_response.tools_call_ids = tool_ids
 
-        if llm_response.completion_text is None and not llm_response.tools_call_args:
-            raise Exception(f"账号态 responses 响应无法解析：{response}。")
-
-        llm_response.raw_completion = response
         response_id = (
             response.get("id")
             if isinstance(response, dict)
             else getattr(response, "id", None)
         )
+        status = (
+            response.get("status")
+            if isinstance(response, dict)
+            else getattr(response, "status", None)
+        )
+        error = (
+            response.get("error")
+            if isinstance(response, dict)
+            else getattr(response, "error", None)
+        )
+        if error is not None or status == "failed" or (
+            status != "completed" and not output_items
+        ):
+            error_summary = (
+                error.get("message") or error.get("code")
+                if isinstance(error, dict)
+                else getattr(error, "message", None) or getattr(error, "code", None)
+            )
+            if isinstance(error, str):
+                error_summary = error
+            error_summary = " ".join(str(error_summary or "").split())[:200]
+            output_types = [
+                item.get("type")
+                if isinstance(item, dict)
+                else getattr(item, "type", None)
+                for item in output_items
+            ]
+            raise Exception(
+                f"账号态 responses 响应无法解析：id={response_id}, status={status}, "
+                f"error={error_summary}, output_types={output_types}。"
+            )
+        if llm_response.completion_text is None and not llm_response.tools_call_args:
+            llm_response.result_chain = MessageChain().message("")
+
+        llm_response.raw_completion = response
         if response_id:
             llm_response.id = response_id
         usage = self._extract_response_usage(
@@ -1685,10 +1781,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         payloads: dict,
         tools,
         *,
+        conversation_id: str | None = None,
         request_max_retries: int | None = None,
         retry_rate_limits: bool | None = None,
         oauth_web_search: str | None = None,
+        **_extra: Any,
     ) -> LLMResponse:
+        # Ignore unknown keyword arguments from future AstrBot core versions.
         if retry_rate_limits is None:
             retry_rate_limits = payloads.get("_oauth_retry_rate_limits")
         params = self._build_responses_params(
@@ -1719,10 +1818,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         payloads: dict,
         tools,
         *,
+        conversation_id: str | None = None,
         request_max_retries: int | None = None,
         retry_rate_limits: bool | None = None,
         oauth_web_search: str | None = None,
+        **_extra: Any,
     ) -> AsyncGenerator[LLMResponse, None]:
+        # Ignore unknown keyword arguments from future AstrBot core versions.
         del request_max_retries, retry_rate_limits
         params = self._build_responses_params(
             payloads,
