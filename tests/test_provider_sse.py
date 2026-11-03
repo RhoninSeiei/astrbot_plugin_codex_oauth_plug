@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from oauth_plug_openai_codex.openai_oauth_sse import iter_json_sse_events
+from oauth_plug_openai_codex.openai_oauth_sse import iter_json_sse_events, iter_json_sse_text
 
 
 async def _lines(*values):
@@ -10,6 +10,13 @@ async def _lines(*values):
 
 
 class ProviderSSETests(unittest.TestCase):
+    def test_buffered_and_async_parsers_preserve_unicode_line_separators(self):
+        wire = 'data: {"type":"response.completed","output_text":"before\u2028after"}'
+        async def collect():
+            return [event async for event in iter_json_sse_events(_lines(wire, ""))]
+        self.assertEqual(list(iter_json_sse_text(wire)), asyncio.run(collect()))
+        self.assertEqual(list(iter_json_sse_text(wire))[0]["output_text"], "before\u2028after")
+
     def test_parser_joins_multiline_data_and_stops_at_done(self):
         async def collect():
             return [

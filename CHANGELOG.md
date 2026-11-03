@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.4.2 — 2026-11-03
+
+- 合并 [Iking123 的 PR #5](https://github.com/RhoninSeiei/astrbot_plugin_codex_oauth_plug/pull/5)，兼容 AstrBot 传入的 `conversation_id`。
+- 合并 [winslght 的 PR #7](https://github.com/RhoninSeiei/astrbot_plugin_codex_oauth_plug/pull/7)，支持结构化输出格式、拒绝回复及正常完成的空回复。
+- 在贡献基础上加强响应校验：拒绝无效工具参数、失败或未完成响应及畸形 SSE，避免错误信息回显提示词或凭据。保留原有授权和工具接口。
+
 ## v0.4.1 — 2026-10-13
 
 - 精简安装说明和开发文档，保留真实配置截图，移除过时演示素材。

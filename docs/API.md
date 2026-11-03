@@ -29,6 +29,10 @@ async for response in provider.text_chat_stream(prompt="介绍这个项目"):
 
 保留 AstrBot 的图片输入、工具调用和上下文参数。流式请求发生中断后不会把已经输出的文本当作完整回复。
 
+`response_format` 支持 `text`、`json_object` 和 `json_schema`，自动转换为 Responses 的 `text.format`。单次调用的格式优先于提供商配置，并保留 `text` 中其他设置。`json_schema` 需包含 `name` 和 `schema`；模型是否支持结构化输出由服务端决定。
+
+完成状态允许空回复，拒绝内容作为文本返回。失败或未完成响应、无效工具参数和畸形 SSE 会报错，不会作为成功回复或可执行工具调用返回。错误信息不包含服务端原始正文。
+
 推理强度从高到低依次取：
 
 1. 单次 `reasoning.effort`。

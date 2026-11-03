@@ -4,10 +4,42 @@
 """Bounded JSON Server-Sent Events parser adapted from AstrBot's OAuth SSE."""
 
 import json
-from collections.abc import AsyncIterator
+import re
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 DEFAULT_MAX_EVENT_BYTES = 4 * 1024 * 1024
+
+
+def iter_json_sse_text(text: str) -> Iterator[dict[str, Any]]:
+    """Decode a buffered SSE response with the same framing as a live stream."""
+    data_lines: list[str] = []
+    data_bytes = 0
+    for line in [*re.split(r"\r\n|\r|\n", text.removeprefix("\ufeff")), ""]:
+        if line == "":
+            if not data_lines:
+                continue
+            payload = "\n".join(data_lines)
+            data_lines = []
+            data_bytes = 0
+            if payload.strip() == "[DONE]":
+                return
+            try:
+                event = json.loads(payload)
+            except (json.JSONDecodeError, UnicodeError):
+                raise ValueError("OpenAI OAuth SSE 事件包含无效 JSON。") from None
+            if not isinstance(event, dict):
+                raise ValueError("OpenAI OAuth SSE 事件必须是 JSON 对象。")
+            yield event
+            continue
+        field, separator, value = line.partition(":")
+        if field != "data":
+            continue
+        value = value.removeprefix(" ") if separator else ""
+        data_bytes += len(value.encode("utf-8")) + bool(data_lines)
+        if data_bytes > DEFAULT_MAX_EVENT_BYTES:
+            raise ValueError("OpenAI OAuth SSE 事件超过大小上限。")
+        data_lines.append(value)
 
 
 async def iter_json_sse_events(
@@ -60,8 +92,8 @@ async def iter_json_sse_events(
 
                 try:
                     event = json.loads(payload)
-                except (json.JSONDecodeError, UnicodeError) as exc:
-                    raise ValueError("OpenAI OAuth SSE 事件包含无效 JSON。") from exc
+                except (json.JSONDecodeError, UnicodeError):
+                    raise ValueError("OpenAI OAuth SSE 事件包含无效 JSON。") from None
                 if not isinstance(event, dict):
                     raise ValueError("OpenAI OAuth SSE 事件必须是 JSON 对象。")
                 yield event
