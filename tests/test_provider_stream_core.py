@@ -142,17 +142,66 @@ def test_citation_urls_cannot_break_markdown_link_boundaries():
     assert ")" not in citations[0][1] and "[" not in citations[0][1]
 
 
+class _OpenOAuthService:
+    """OAuth service 仍存活时的替身：_require_open() 不抛错。"""
+
+    def _require_open(self):
+        return None
+
+
+class _ClosedOAuthService:
+    """OAuth service 本身已关闭时的替身：_require_open() 抛 closed。"""
+
+    def _require_open(self):
+        raise RuntimeError("OAuth service is closed")
+
+
 @pytest.mark.asyncio
-async def test_terminate_closes_active_stream_connections():
+async def test_terminate_closes_active_stream_connections(monkeypatch):
+    # 契约变更说明：旧契约要求实例被 terminate() 后入口永久抛
+    # "OAuth provider is closed"。这正是 issue #11 的成因之一——宿主
+    # 并不知道实例已被插件内部 terminate，仍继续向它派发请求并全部
+    # 失败。新契约（懒恢复）：terminate() 仍会关闭活跃的流连接，但
+    # 只要所属 OAuth service 仍存活，后续入口会恢复实例并继续工作；
+    # 只有 service 本身关闭时才保持抛 closed（见下一条测试）。
     provider = _make_provider()
     active = AsyncMock()
     provider._oauth_stream_clients = {active}
     await provider.terminate()
     active.aclose.assert_awaited_once()
+
+    provider._oauth_service = _OpenOAuthService()
+    completed = _FakeStreamResponse(
+        200,
+        _lines(
+            'data: {"type":"response.completed","response":{"output_text":"ok"}}',
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        oauth_source.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _FakeAsyncClient(completed),
+    )
+    provider._ensure_fresh_oauth_token = AsyncMock()
+    events = [event async for event in provider._stream_backend_events({})]
+    assert [event["type"] for event in events] == ["response.completed"]
+    provider._ensure_fresh_oauth_token.assert_awaited_once()
+    assert provider._oauth_media_closed is False
+
+
+@pytest.mark.asyncio
+async def test_stream_entry_stays_closed_when_oauth_service_closed():
+    # 新契约的另一半：OAuth service 本身已关闭时懒恢复必须拒绝，
+    # 入口保持抛 closed，且不会去刷新 token 或访问后端。
+    provider = _make_provider()
+    await provider.terminate()
+    provider._oauth_service = _ClosedOAuthService()
     provider._ensure_fresh_oauth_token = AsyncMock()
     with pytest.raises(RuntimeError, match="closed"):
         await anext(provider._stream_backend_events({}))
     provider._ensure_fresh_oauth_token.assert_not_awaited()
+    assert provider._oauth_media_closed is True
 
 
 @pytest.mark.asyncio
