@@ -18,9 +18,15 @@ class OpenAIOAuthAudioMixin:
         extra_parts = kwargs.get(
             "extra_user_content_parts", args[6] if len(args) > 6 else None
         )
-        # A None prompt lets the parent use the existing context without
-        # appending a new user message for its supplemental content.
-        if prompt is None and (audio_urls or (extra_parts and not contexts)):
+        extra_media = any(
+            getattr(part, "type", None) in ("image_url", "audio_url")
+            for part in extra_parts or []
+        )
+        # Metadata alone must not create an empty turn over existing history.
+        # Actual extra media still needs a new turn for the parent's resolver.
+        if prompt is None and (
+            audio_urls or extra_media or (extra_parts and not contexts)
+        ):
             prompt = ""
         prepared = await super()._prepare_chat_payload(prompt, *args, **kwargs)
         if tool_choice is not None and tool_choice != "auto":

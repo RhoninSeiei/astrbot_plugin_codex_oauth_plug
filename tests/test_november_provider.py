@@ -80,6 +80,74 @@ class NovemberProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fresh["messages"]), 1)
         self.assertIn("user identity and time", str(fresh["messages"][0]))
 
+    async def test_real_core_extra_media_survives_with_history(self):
+        from astrbot.core.provider.sources import openai_source
+
+        if not hasattr(openai_source, "ImageURLPart"):
+            self.skipTest("Requires real AstrBot core")
+        contexts = [{"role": "user", "content": "previous user text"}]
+        image_url = "data:image/png;base64," + base64.b64encode(raster_data("PNG")).decode()
+        for kind in ("image", "audio"):
+            for positional in (False, True):
+                with self.subTest(kind=kind, positional=positional):
+                    provider = self.provider()
+                    provider.provider_config["oauth_audio_transcription"] = True
+                    provider.transcribe_audio = AsyncMock(return_value="new audio transcript")
+                    if kind == "image":
+                        media = openai_source.ImageURLPart(image_url={"url": image_url})
+                    else:
+                        media = openai_source.AudioURLPart(audio_url={"url": "synthetic.wav"})
+                    extra = [openai_source.TextPart(text="user identity and time"), media]
+                    if positional:
+                        payload, _ = await provider._prepare_chat_payload(
+                            None, None, None, contexts, None, None, None, extra
+                        )
+                    else:
+                        payload, _ = await provider._prepare_chat_payload(
+                            None, contexts=contexts, extra_user_content_parts=extra
+                        )
+                    self.assertEqual(len(payload["messages"]), 2)
+                    self.assertEqual(payload["messages"][0], contexts[0])
+                    content = payload["messages"][-1]["content"]
+                    self.assertIn("user identity and time", str(content))
+                    if kind == "image":
+                        self.assertTrue(any(part.get("type") == "image_url" for part in content))
+                        provider.transcribe_audio.assert_not_awaited()
+                    else:
+                        self.assertIn("new audio transcript", str(content))
+                        provider.transcribe_audio.assert_awaited_once()
+                    self.assertEqual(contexts, [{"role": "user", "content": "previous user text"}])
+
+    async def test_real_core_extra_audio_obeys_transcription_permission(self):
+        from astrbot.core.provider.sources import openai_source
+
+        if not hasattr(openai_source, "AudioURLPart"):
+            self.skipTest("Requires real AstrBot core")
+        provider = self.provider()
+        provider.provider_config["oauth_audio_transcription"] = False
+        provider.transcribe_audio = AsyncMock()
+        with self.assertRaises(ValueError):
+            await provider._prepare_chat_payload(
+                None, contexts=[{"role": "user", "content": "previous text"}],
+                extra_user_content_parts=[openai_source.AudioURLPart(audio_url={"url": "synthetic.wav"})],
+            )
+        provider.transcribe_audio.assert_not_awaited()
+
+    async def test_real_core_ordinary_image_urls_keeps_none_prompt_semantics(self):
+        from astrbot.core.provider.sources import openai_source
+
+        if not hasattr(openai_source, "ImageURLPart"):
+            self.skipTest("Requires real AstrBot core")
+        provider = self.provider()
+        provider._resolve_image_part = AsyncMock()
+        contexts = [{"role": "user", "content": "previous text"}]
+        payload, _ = await provider._prepare_chat_payload(
+            None, image_urls=["unused.png"], contexts=contexts,
+            extra_user_content_parts=[openai_source.TextPart(text="metadata only")],
+        )
+        self.assertEqual(payload["messages"], contexts)
+        provider._resolve_image_part.assert_not_awaited()
+
     async def test_explicit_image_models_and_default_26(self):
         provider = self.provider()
         provider._request_image_backend = AsyncMock(return_value={"output": []})
