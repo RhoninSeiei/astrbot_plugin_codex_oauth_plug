@@ -50,15 +50,21 @@
         "default": ""
       },
       "models": {
-        "description": "模型列表",
+        "description": "手动补充模型列表",
         "type": "text",
-        "hint": "每行填写一个模型 ID，首行作为默认模型。示例：gpt-5.6-sol。",
-        "default": "gpt-5.6-sol\ngpt-6.1-sol\ngpt-6-astra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-terra\ngpt-5.6-luna"
+        "hint": "每行一个模型 ID，首行保持为连接测试默认模型；开启自动获取后无需手动补录新模型。",
+        "default": "gpt-5.6-sol\ngpt-6.1-sol\ngpt-6.1-terra\ngpt-6-astra\ngpt-6-sol\ngpt-6-luna\ngpt-5.6-terra\ngpt-5.6-luna"
       },
       "oauth_refresh_skew_seconds": {
         "description": "提前刷新秒数",
         "type": "int",
         "default": 300
+      },
+      "auto_models": {
+        "description": "自动获取模型列表",
+        "type": "bool",
+        "default": true,
+        "hint": "已绑定账号时从 Codex 获取模型目录，与手动列表合并。失败时保留手动列表；发现结果缓存 5 分钟。"
       }
     }
   },
@@ -140,14 +146,16 @@
       "oauth_image_model": {
         "description": "实验性图片模型",
         "type": "string",
-        "default": "",
+        "default": "gpt-image-2.6-sunburst",
         "options": [
-          "",
-          "gpt-image-2",
+          "gpt-image-2.6-sunburst",
+          "gpt-image-2.6-flare",
+          "gpt-image-2.5-sunburst",
           "gpt-image-2.5-flare",
-          "gpt-image-2.5-sunburst"
+          "gpt-image-2",
+          ""
         ],
-        "hint": "留空使用服务端默认值。仅写入 image_generation 工具的 model，不改变主控聊天模型；服务端可能忽略此请求，无法据此确认实际使用的图片模型。"
+        "hint": "默认请求 Images 2.6 Sunburst；其他插件可在单次调用覆盖。该字段不改变主控聊天模型，后端未回报实际图像模型，不能保证选择生效。"
       }
     }
   }

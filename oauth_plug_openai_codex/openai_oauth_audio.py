@@ -13,8 +13,14 @@ class OpenAIOAuthAudioMixin:
 
     async def _prepare_chat_payload(self, prompt, *args, **kwargs):
         tool_choice = kwargs.pop("_oauth_tool_choice", None)
-        audio_urls = kwargs.get("audio_urls") or (args[1] if len(args) > 1 else None)
-        if prompt is None and (audio_urls or kwargs.get("extra_user_content_parts")):
+        audio_urls = kwargs.get("audio_urls", args[1] if len(args) > 1 else None)
+        contexts = kwargs.get("contexts", args[2] if len(args) > 2 else None)
+        extra_parts = kwargs.get(
+            "extra_user_content_parts", args[6] if len(args) > 6 else None
+        )
+        # A None prompt lets the parent use the existing context without
+        # appending a new user message for its supplemental content.
+        if prompt is None and (audio_urls or (extra_parts and not contexts)):
             prompt = ""
         prepared = await super()._prepare_chat_payload(prompt, *args, **kwargs)
         if tool_choice is not None and tool_choice != "auto":

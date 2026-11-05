@@ -14,7 +14,7 @@ from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 from oauth_plug_openai_codex.provider import ProviderOAuthPlugOpenAICodex
 
 
-IMAGE = b"\x89PNG\r\n\x1a\nimage"
+IMAGE = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
 
 
 def image_events():
