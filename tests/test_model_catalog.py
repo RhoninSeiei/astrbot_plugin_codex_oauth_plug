@@ -74,6 +74,40 @@ class CatalogProvider:
 
 
 class ModelCatalogTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_works_without_python_311_timeout_context(self):
+        provider = CatalogProvider([CatalogResponse({"models": [{"slug": "remote-model"}]})])
+        with patch.dict(asyncio.__dict__):
+            asyncio.__dict__.pop("timeout", None)
+            result = await model_catalog.discover_models(provider, ["manual"])
+        self.assertEqual(result, ["manual", "remote-model"])
+        self.assertEqual(len(provider.requests), 1)
+
+    async def test_overall_deadline_cancels_refresh_and_read_operations(self):
+        for phase in ("initial_refresh", "read", "auth_refresh"):
+            with self.subTest(phase=phase):
+                cleaned = asyncio.Event()
+
+                async def block(*args):
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cleaned.set()
+
+                provider = CatalogProvider([
+                    CatalogResponse({"models": []}, status=401 if phase == "auth_refresh" else 200,
+                                    before_read=block if phase == "read" else None)
+                ])
+                if phase == "initial_refresh":
+                    provider._ensure_fresh_oauth_token.side_effect = block
+                elif phase == "auth_refresh":
+                    provider._refresh_after_auth_failure.side_effect = block
+                with patch.object(model_catalog, "CATALOG_TIMEOUT_SECONDS", 0.01):
+                    result = await model_catalog.discover_models(provider, ["manual"])
+                self.assertEqual(result, ["manual"])
+                self.assertTrue(cleaned.is_set())
+                self.assertFalse(provider._oauth_model_catalog_lock.locked())
+                self.assertLessEqual(len(provider.requests), 1)
+
     async def test_discovers_visible_models_and_preserves_manual_order(self):
         provider = CatalogProvider(
             [
@@ -121,7 +155,7 @@ class ModelCatalogTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_is_sanitized_and_short_cached(self):
         provider = CatalogProvider([RuntimeError("SECRET_BACKEND_BODY")])
         with patch.object(model_catalog.logger, "warning") as warning:
-            with patch.object(model_catalog.time, "monotonic", return_value=100):
+            with patch.object(model_catalog, "time", types.SimpleNamespace(monotonic=lambda: 100)):
                 self.assertEqual(await model_catalog.discover_models(provider, ["first"]), ["first"])
                 self.assertEqual(await model_catalog.discover_models(provider, ["second"]), ["second"])
             self.assertEqual(warning.call_count, 1)
@@ -196,10 +230,10 @@ class ModelCatalogTests(unittest.IsolatedAsyncioTestCase):
         provider = CatalogProvider(
             [CatalogResponse({"models": [{"slug": name}]}) for name in ("first", "second", "third")]
         )
-        with patch.object(model_catalog.time, "monotonic", return_value=100):
+        with patch.object(model_catalog, "time", types.SimpleNamespace(monotonic=lambda: 100)):
             self.assertEqual(await model_catalog.discover_models(provider, []), ["first"])
             self.assertEqual(await model_catalog.discover_models(provider, []), ["first"])
-        with patch.object(model_catalog.time, "monotonic", return_value=401):
+        with patch.object(model_catalog, "time", types.SimpleNamespace(monotonic=lambda: 401)):
             self.assertEqual(await model_catalog.discover_models(provider, []), ["second"])
             provider.base_url += "/different"
             self.assertEqual(await model_catalog.discover_models(provider, []), ["third"])

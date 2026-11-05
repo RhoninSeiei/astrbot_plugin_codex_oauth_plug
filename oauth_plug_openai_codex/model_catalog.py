@@ -108,25 +108,32 @@ async def discover_models(provider: Any, fallback: list[str]) -> list[str]:
         discovered: tuple[str, ...] = ()
         ttl = 300
         request_key = key
+
+        async def fetch_with_refresh() -> tuple[str, ...]:
+            nonlocal request_key
+            await provider._ensure_fresh_oauth_token()
+            provider._sync_oauth_credentials_from_shared()
+            credentials = provider._oauth_shared_state.snapshot()
+            if not credentials.get("oauth_access_token") and credentials.get(
+                "oauth_refresh_token"
+            ):
+                await provider._refresh_after_auth_failure(
+                    provider._oauth_shared_state.version
+                )
+            request_key = _cache_key(provider)
+            status, models, attempted_version = await _request_catalog(provider)
+            if status in (401, 403):
+                if await provider._refresh_after_auth_failure(attempted_version):
+                    request_key = _cache_key(provider)
+                    status, models, _version = await _request_catalog(provider)
+            if status < 200 or status >= 300:
+                raise ValueError("Model catalog request failed")
+            return models
+
         try:
-            async with asyncio.timeout(CATALOG_TIMEOUT_SECONDS):
-                await provider._ensure_fresh_oauth_token()
-                provider._sync_oauth_credentials_from_shared()
-                credentials = provider._oauth_shared_state.snapshot()
-                if not credentials.get("oauth_access_token") and credentials.get(
-                    "oauth_refresh_token"
-                ):
-                    await provider._refresh_after_auth_failure(
-                        provider._oauth_shared_state.version
-                    )
-                request_key = _cache_key(provider)
-                status, discovered, attempted_version = await _request_catalog(provider)
-                if status in (401, 403):
-                    if await provider._refresh_after_auth_failure(attempted_version):
-                        request_key = _cache_key(provider)
-                        status, discovered, _version = await _request_catalog(provider)
-                if status < 200 or status >= 300:
-                    raise ValueError("Model catalog request failed")
+            discovered = await asyncio.wait_for(
+                fetch_with_refresh(), timeout=CATALOG_TIMEOUT_SECONDS
+            )
         except Exception:
             ttl = 30
             discovered = ()
