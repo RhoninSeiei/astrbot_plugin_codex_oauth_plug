@@ -470,9 +470,32 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         text = raw_text.decode("utf-8", errors="replace")
         return response.status_code, text, attempted_version
 
-    async def _request_backend(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def _ensure_oauth_provider_open(self) -> None:
+        # 实例被 terminate() 关过、但所属 OAuth service 仍开着时懒恢复：
+        # 等清理任务结束，确认 service 未关，再丢弃已关的懒客户端并清
+        # 标志。service 本身已关闭时 _require_open() 会拒绝，实例保持
+        # 关闭。清理失败原样上抛，不复活可能处于半关闭状态的资源。
+        if not getattr(self, "_oauth_media_closed", False):
+            return
+        cleanup_task = getattr(self, "_oauth_media_cleanup_task", None)
+        if cleanup_task is not None:
+            await asyncio.shield(cleanup_task)
+        service = getattr(self, "_oauth_service", None)
+        if service is not None:
+            service._require_open()
         if getattr(self, "_oauth_media_closed", False):
-            raise RuntimeError("OAuth provider is closed")
+            # A retained provider can be reused after terminate(). Request HTTP
+            # clients are per-call; discard the closed lazy media clients too.
+            for name in (
+                "_oauth_media_cleanup_task",
+                "_oauth_transcription_client",
+                "_oauth_realtime_client",
+            ):
+                self.__dict__.pop(name, None)
+            self._oauth_media_closed = False
+
+    async def _request_backend(self, payload: dict[str, Any]) -> dict[str, Any]:
+        await self._ensure_oauth_provider_open()
         await self._ensure_fresh_oauth_token()
         status_code, text, attempted_version = await self._request_backend_once(payload)
 
@@ -499,8 +522,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         follow_redirects: bool,
         timeout: float | None = None,
     ):
-        if getattr(self, "_oauth_media_closed", False):
-            raise RuntimeError("OAuth provider is closed")
+        await self._ensure_oauth_provider_open()
         if not hasattr(self, "_oauth_stream_clients"):
             self._oauth_stream_clients = set()
         client = httpx.AsyncClient(
@@ -525,8 +547,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         payload: dict[str, Any],
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Yield decoded SSE events and refresh OAuth only before any output."""
-        if getattr(self, "_oauth_media_closed", False):
-            raise RuntimeError("OAuth provider is closed")
+        await self._ensure_oauth_provider_open()
         await self._ensure_fresh_oauth_token()
         auth_retry_available = True
         while True:
@@ -626,8 +647,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         payload: dict[str, Any],
         request_timeout: float | None = None,
     ) -> dict[str, Any]:
-        if getattr(self, "_oauth_media_closed", False):
-            raise RuntimeError("OAuth provider is closed")
+        await self._ensure_oauth_provider_open()
         await self._ensure_fresh_oauth_token()
         first_result = await self._request_image_backend_once(payload, request_timeout)
         if len(first_result) == 2:
@@ -688,8 +708,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
 
         try:
             async with asyncio.timeout(deadline_seconds):
-                if getattr(self, "_oauth_media_closed", False):
-                    raise OpenAIOAuthImageStreamError("provider_closed")
+                await self._ensure_oauth_provider_open()
                 await self._ensure_fresh_oauth_token()
                 if not hasattr(self, "_oauth_stream_clients"):
                     self._oauth_stream_clients = set()
