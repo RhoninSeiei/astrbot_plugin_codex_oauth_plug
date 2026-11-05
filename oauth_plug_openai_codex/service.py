@@ -22,6 +22,7 @@ DEFAULT_MODEL = "gpt-5.6-sol"
 DEFAULT_MODELS = (
     DEFAULT_MODEL,
     "gpt-6.1-sol",
+    "gpt-6.1-terra",
     "gpt-6-astra",
     "gpt-6-sol",
     "gpt-6-luna",
@@ -160,12 +161,13 @@ class OpenAICodexOAuthService:
             value = self._get_config_value(key, "oauth")
             if value not in (None, ""):
                 merged[key] = value
+        merged.setdefault("oauth_auto_models", self._get_config_value("auto_models", "runtime", True))
         merged["oauth_shared_state"] = self.shared_state
         merged["oauth_refresh_skew_seconds"] = self._get_config_value(
             "oauth_refresh_skew_seconds", "runtime", 300
         )
         for key, default in (
-            ("oauth_image_model", ""),
+            ("oauth_image_model", "gpt-image-2.6-sunburst"),
             ("oauth_web_search", "disabled"),
             ("oauth_web_search_domains", []),
             ("oauth_audio_transcription", False),

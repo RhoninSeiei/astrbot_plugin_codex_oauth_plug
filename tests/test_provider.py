@@ -255,8 +255,8 @@ class ProviderImageGenerationTests(unittest.TestCase):
         capabilities = ProviderOAuthPlugOpenAICodex.model_capabilities
 
         self.assertEqual(
-            list(capabilities)[:4],
-            ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+            list(capabilities)[:5],
+            ["gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
         )
         for model in ("gpt-6-sol", "gpt-6-luna"):
             with self.subTest(model=model):
@@ -737,7 +737,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
     def test_generate_image_without_reference_builds_generate_payload(self):
         with TemporaryDirectory() as tmp:
-            output_image_bytes = b"\x89PNG\r\n\x1a\noutput"
+            output_image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
             requested_payloads = []
             requested_timeouts = []
             provider = self._make_provider(tmp)
@@ -773,6 +773,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 [
                     {
                         "type": "image_generation",
+                        "model": "gpt-image-2.6-sunburst",
                         "action": "generate",
                         "size": "1024x1024",
                     }
@@ -802,8 +803,8 @@ class ProviderImageGenerationTests(unittest.TestCase):
     def test_generate_image_with_reference_file_builds_image_edit_payload(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            source_image_bytes = b"\x89PNG\r\n\x1a\nreference"
-            output_image_bytes = b"\x89PNG\r\n\x1a\noutput"
+            source_image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            output_image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
             source_path = tmp_path / "reference.png"
             source_path.write_bytes(source_image_bytes)
             requested_payloads = []
@@ -838,6 +839,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 [
                     {
                         "type": "image_generation",
+                        "model": "gpt-image-2.6-sunburst",
                         "action": "edit",
                         "size": "1024x1024",
                     }
@@ -876,7 +878,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
     def test_generate_image_with_data_url_reference_keeps_data_url(self):
         with TemporaryDirectory() as tmp:
-            output_image_bytes = b"\x89PNG\r\n\x1a\noutput"
+            output_image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
             data_url = "data:image/jpeg;base64," + base64.b64encode(b"jpeg").decode()
             requested_payloads = []
             provider = self._make_provider(tmp)
@@ -908,6 +910,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 [
                     {
                         "type": "image_generation",
+                        "model": "gpt-image-2.6-sunburst",
                         "action": "auto",
                     }
                 ],
@@ -922,7 +925,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
 
     def test_generate_image_reads_sse_incrementally(self):
         with TemporaryDirectory() as tmp:
-            image_bytes = b"\x89PNG\r\n\x1a\nstreamed"
+            image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
             image_base64 = base64.b64encode(image_bytes).decode()
             sent_requests = []
             client_timeouts = []
@@ -1001,6 +1004,7 @@ class ProviderImageGenerationTests(unittest.TestCase):
                 [
                     {
                         "type": "image_generation",
+                        "model": "gpt-image-2.6-sunburst",
                         "action": "generate",
                     }
                 ],
@@ -1094,8 +1098,8 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
     def test_other_plugin_can_call_generate_image_with_reference_image(self):
         with TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            output_image_bytes = b"\x89PNG\r\n\x1a\nexternal"
-            reference_image_bytes = b"\x89PNG\r\n\x1a\nexternal-reference"
+            output_image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            reference_image_bytes = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
             reference_path = tmp_path / "reference.png"
             reference_path.write_bytes(reference_image_bytes)
             provider = self._make_provider(tmp)

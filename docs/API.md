@@ -82,20 +82,30 @@ images = await provider.generate_image(
     n=1,
     reference_images=reference_images,
     timeout=180.0,
-    image_model="gpt-image-2.5-flare",  # 可选的实验性图片模型请求
+    image_model="gpt-image-2.6-sunburst",  # 可选的实验性图片模型请求
 )
 for image in images:
     print(image.path, image.mime_type)
 ```
 
 - `reference_images` 支持本地路径、`file://`、HTTP 图片 URL 和 `data:image/...`。
-- `model` 是 Responses 主控聊天模型；`image_model` 是 `image_generation` 工具的实验性模型请求，支持 `gpt-image-2`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`。服务端可能忽略该字段，不能将其视为实际图片模型的选择保证。
-- `image_model=None` 或省略时继承 `oauth_image_model` 配置；`image_model=""` 显式取消指定，即使配置中设有图片模型也不发送工具的 `model` 字段。仅可用关键字传入，兼容原有位置参数调用。
+- `model` 是 Responses 主控聊天模型；`image_model` 是 `image_generation` 工具的实验性模型请求，支持 `gpt-image-2`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、`gpt-image-2.6-flare`、`gpt-image-2.6-sunburst`。服务端可能忽略该字段，不能将其视为实际图片模型的选择保证。
+- `image_model=None` 或省略时继承 `oauth_image_model` 配置，默认请求 `gpt-image-2.6-sunburst`；`image_model=""` 显式取消指定，即使配置中设有图片模型也不发送工具的 `model` 字段。仅可用关键字传入，兼容原有位置参数调用。
 - 有参考图时默认 `action=edit`，无参考图时默认 `action=generate`，也可显式传入 `action`。
 - `timeout` 为本次图片请求的超时秒数；省略或为 `None` 时使用提供商默认值，不修改其他调用的超时。
 - `transport="http"` 为默认的历史接口；可在调用方确认 `image_websocket` 能力后传入 `transport="websocket"`。WebSocket 的 `timeout` 覆盖令牌刷新、连接、发送与接收的总时长。
-- 结果对象包含 `path`、`mime_type`、`revised_prompt` 和 `raw`。
+- 结果对象保留 `path`、`mime_type`、`revised_prompt` 和 `raw`，新增 `frame_count` 和 `is_animated`。文件扩展名及 MIME 根据实际 PNG、JPEG、WebP、GIF 字节确定，GIF 原始字节和动画帧保持不变。
 - 文件保存到插件配置的 `generated_image_dir`；留空时为 AstrBot data 下的 `generated/openai_oauth_images`。调用方负责发送、转存和后续文件管理。
+
+### 图片格式与 GIF 边界
+
+`generate_image()` 可通过关键字参数 `output_format="png"`、`"jpeg"` 或 `"webp"` 请求输出格式；省略时使用后端默认值。显式请求与返回格式不符时会报错，不会把返回内容伪装成所选格式。
+
+2026-11-06 的 Codex OAuth 后端实测拒绝 `output_format="gif"`，因此该参数目前在请求前报错。公开 Image API 的 GIF 能力不等同于 Codex OAuth 能力，插件不承诺动画 GIF 生成或编辑。
+
+本地文件和 data URL 的静态 GIF 会转成 PNG 参考图。动画 GIF 默认拒绝；需要仅编辑首帧时显式传入 `gif_input_mode="first_frame"`，原文件保持不变，生成结果不保留输入动画。`.gif` 远程 URL 需先由调用方保存为本地文件，再检查帧数；其他远程 URL 保持透传，由后端处理。
+
+显式选择图片模型示例：`image_model="gpt-image-2.6-sunburst"`、`"gpt-image-2.5-sunburst"`、`"gpt-image-2"`。实测这三种请求均返回 PNG，但输出未包含实际图片模型字段，不能仅凭请求成功判断选择生效。
 
 ## 音频转录
 

@@ -4,10 +4,8 @@
 """Independent Codex OAuth provider adapted from AstrBot production source."""
 
 import asyncio
-import base64
 import json
 import math
-import mimetypes
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -41,6 +39,7 @@ from .provider_runtime_compat import (
 )
 
 from .headers import build_codex_backend_headers
+from .image_media import decode_result, reference_image_url
 from .service import OAUTH_PLACEHOLDER_KEY, get_service
 
 oauth_provider_stat_kind: ContextVar[str] = ContextVar(
@@ -51,7 +50,8 @@ IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 IMAGE_WEBSOCKET_MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
 IMAGE_WEBSOCKET_MAX_EVENTS = 16384
 OAUTH_IMAGE_MODEL_ALIASES = frozenset(
-    {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"}
+    {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
+     "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"}
 )
 
 
@@ -77,6 +77,8 @@ class OAuthPlugImageResult:
     mime_type: str = "image/png"
     revised_prompt: str = ""
     raw: dict[str, Any] | None = None
+    frame_count: int = 1
+    is_animated: bool = False
 
 
 class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial):
@@ -91,6 +93,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         "image_websocket": True,
     }
     model_capabilities = {
+        "gpt-6.1-terra": {
+            "default_reasoning_effort": "medium",
+            "supported_reasoning_efforts": ("none", "low", "medium", "high", "xhigh", "max"),
+        },
         "gpt-6.1-sol": {
             "default_reasoning_effort": "medium",
             "supported_reasoning_efforts": (
@@ -265,11 +271,19 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             service.register_provider(self)
 
     async def get_models(self):
+        from .model_catalog import discover_models
+
+        if getattr(self, "_oauth_media_closed", False):
+            raise RuntimeError("OAuth provider is closed")
         service = getattr(self, "_oauth_service", None) or get_service()
         if service is not None:
-            return service.get_models()
-        configured_model = str(self.provider_config.get("model") or "").strip()
-        return [configured_model] if configured_model else list(self.model_capabilities)
+            fallback = service.get_models()
+        else:
+            configured_model = str(self.provider_config.get("model") or "").strip()
+            fallback = [configured_model] if configured_model else list(self.model_capabilities)
+        if self.provider_config.get("oauth_auto_models", True) is False:
+            return fallback
+        return await discover_models(self, fallback)
 
     async def _prepare_chat_payload(
         self,
@@ -289,7 +303,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             *args,
             **kwargs,
         )
-        for key in ("reasoning_effort", "reasoning"):
+        for key in ("reasoning_effort", "reasoning", "response_format"):
             if kwargs.get(key) is not None:
                 payloads[key] = kwargs[key]
         if kwargs.get("oauth_web_search") is not None:
@@ -818,11 +832,21 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 return value
         return "backend_error"
 
+    def _log_backend_failure(self, data: Any, status_code: int | None = None) -> None:
+        if not isinstance(status_code, int) or not 100 <= status_code <= 599:
+            status_code = None
+        logger.warning(
+            "Codex backend failure: reason=%s status=%s",
+            self._compact_backend_error(data),
+            status_code,
+        )
+
     def _format_backend_error(self, status_code: int, text: str) -> str:
         try:
             data = json.loads(text)
         except (ValueError, TypeError):
             data = None
+        self._log_backend_failure(data, status_code)
         summary = self._compact_backend_error(data)
         return f"Codex backend request failed: status={status_code}, reason={summary}"
 
@@ -848,6 +872,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 status = response.get("status")
                 if status in ("failed", "incomplete", "cancelled"):
                     status_code = self._extract_stream_error_status_code(event)
+                    self._log_backend_failure(event, status_code)
                     if status_code is not None:
                         raise ProviderRequestError(
                             "Codex response failed or did not complete",
@@ -893,6 +918,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         )
         if error_payload:
             status_code = self._extract_stream_error_status_code(error_payload)
+            self._log_backend_failure(error_payload, status_code)
             message = (
                 "Codex backend returned error event: "
                 f"{self._compact_backend_error(error_payload)}"
@@ -1403,14 +1429,14 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         params.pop("temperature", None)
         model_name = str(params.get("model") or "").strip().lower()
         if model_name.startswith(
-            ("gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+            ("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
         ):
             params.pop("top_p", None)
             params.pop("top_logprobs", None)
         strips_reasoning_sampling = model_name.startswith(
             ("gpt-6.1-sol", "gpt-6-astra")
         ) or (
-            model_name.startswith(("gpt-6-sol", "gpt-6-luna"))
+            model_name.startswith(("gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra"))
             and reasoning.get("effort") != "none"
         )
         if strips_reasoning_sampling:
@@ -1470,6 +1496,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         status = response.get("status") if isinstance(response, dict) else getattr(response, "status", None)
         error = response.get("error") if isinstance(response, dict) else getattr(response, "error", None)
         if error is not None or status not in (None, "completed"):
+            self._log_backend_failure(response)
             raise RuntimeError("Codex response failed or did not complete")
         llm_response = LLMResponse("assistant")
         output_text = ""
@@ -1854,6 +1881,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             "response.incomplete",
         }:
             status_code = self._extract_stream_error_status_code(event)
+            self._log_backend_failure(event, status_code)
             if status_code is None:
                 error = RuntimeError(f"Codex backend stream ended with {event_type}")
             else:
@@ -1976,6 +2004,8 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         transport: str = "http",
         *,
         image_model: str | None = None,
+        output_format: str | None = None,
+        gif_input_mode: str = "reject",
     ) -> list[OAuthPlugImageResult]:
         """Generate images and persist aggregate OAuth token usage.
 
@@ -1988,8 +2018,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             action: Image tool action override.
             timeout: Optional per-image deadline, including the whole HTTP request.
             transport: Image transport, either HTTP or WebSocket.
-            image_model: Experimental image tool model. None inherits the source
-                setting; an empty string explicitly omits the tool model.
+            image_model: Requested image tool model. None inherits the source
+                setting (Images 2.6 Sunburst by default); an empty string omits it.
+            output_format: Optional png, jpeg or webp request. The current Codex
+                OAuth backend rejects gif output.
+            gif_input_mode: Reject animation by default; first_frame explicitly
+                converts an animated GIF reference to a single PNG frame.
 
         Returns:
             Extracted image results from all backend generations.
@@ -2012,7 +2046,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             if not math.isfinite(request_timeout) or request_timeout <= 0:
                 raise ValueError("timeout 必须是有限正浮点数。")
         selected_image_model = (
-            self.provider_config.get("oauth_image_model", "")
+            self.provider_config.get("oauth_image_model", "gpt-image-2.6-sunburst")
             if image_model is None
             else image_model
         )
@@ -2026,6 +2060,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         else:
             selected_image_model = ""
 
+        if output_format not in (None, "png", "jpeg", "webp", "gif"):
+            raise ValueError("output_format 必须为 png、jpeg、webp 或 gif。")
+        if gif_input_mode not in ("reject", "first_frame"):
+            raise ValueError("gif_input_mode 必须为 reject 或 first_frame。")
+        if output_format == "gif":
+            raise ValueError("当前 Codex OAuth 后端不支持 GIF 输出；不会自动改为 PNG。")
+
         start_time = time.time()
         total_usage = TokenUsage()
         try:
@@ -2037,6 +2078,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             instructions = str(prompt or "").strip()
             if not instructions:
                 raise ValueError("图片生成提示词不能为空。")
+            references = [
+                await asyncio.to_thread(reference_image_url, image, gif_input_mode=gif_input_mode)
+                for image in references
+            ]
             image_input = self._build_image_generation_input(instructions, references)
             image_action = (action or ("edit" if references else "generate")).strip()
             if not image_action:
@@ -2052,6 +2097,8 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     tool["size"] = size
                 if selected_image_model:
                     tool["model"] = selected_image_model
+                if output_format is not None:
+                    tool["output_format"] = output_format
                 payload = {
                     "model": model or self.get_model(),
                     "input": image_input,
@@ -2084,7 +2131,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     )
                     if response_usage is not None:
                         total_usage = total_usage + response_usage
-                    results.extend(await self._extract_generated_images(response))
+                    if output_format is None:
+                        results.extend(await self._extract_generated_images(response))
+                    else:
+                        results.extend(await self._extract_generated_images(response, expected_format=output_format))
                 except asyncio.CancelledError:
                     image_status = "aborted"
                     raise
@@ -2155,30 +2205,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         }
 
     def _reference_image_to_image_url(self, image: str) -> str:
-        value = str(image or "").strip()
-        if not value:
-            raise ValueError("参考图不能为空。")
-
-        lower = value.lower()
-        if lower.startswith("data:image/"):
-            return value
-        if lower.startswith(("http://", "https://")):
-            return value
-
-        path_value = value[7:] if lower.startswith("file://") else value
-        path = Path(path_value).expanduser()
-        if not path.is_file():
-            raise ValueError(f"参考图文件不存在: {value}")
-
-        mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
-        if not mime_type.startswith("image/"):
-            mime_type = "image/png"
-        encoded = base64.b64encode(path.read_bytes()).decode()
-        return f"data:{mime_type};base64,{encoded}"
+        return reference_image_url(image)
 
     async def _extract_generated_images(
         self,
         response: dict[str, Any],
+        *,
+        expected_format: str | None = None,
     ) -> list[OAuthPlugImageResult]:
         output = response.get("output") or []
         if not isinstance(output, list):
@@ -2199,21 +2232,24 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             image_base64 = self._extract_image_base64_from_output_item(item)
             if not image_base64:
                 continue
-            if "," in image_base64 and image_base64.startswith("data:"):
-                image_base64 = image_base64.split(",", 1)[1]
-            file_path = image_dir / f"{uuid.uuid4().hex}.png"
-            file_path.write_bytes(base64.b64decode(image_base64))
+            data, extension, mime_type, frame_count = await asyncio.to_thread(decode_result, image_base64)
+            if expected_format is not None and extension != expected_format:
+                raise ValueError("后端返回的图片格式与请求不一致，未保存为错误格式。")
+            file_path = image_dir / f"{uuid.uuid4().hex}.{extension}"
+            file_path.write_bytes(data)
             results.append(
                 OAuthPlugImageResult(
                     path=str(file_path),
-                    mime_type="image/png",
+                    mime_type=mime_type,
+                    frame_count=frame_count,
+                    is_animated=frame_count > 1,
                     revised_prompt=str(item.get("revised_prompt") or ""),
                     raw=item,
                 )
             )
 
         if not results:
-            raise Exception(f"Codex 图像生成响应未包含可提取图片：{response}")
+            raise ValueError("Codex 图像生成响应未包含可提取图片。")
         return results
 
     def _extract_image_base64_from_output_item(self, item: dict[str, Any]) -> str:

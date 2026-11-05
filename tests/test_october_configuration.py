@@ -22,4 +22,4 @@ class OctoberConfigurationTests(unittest.TestCase):
         self.assertEqual(service.build_provider_config({})["oauth_image_model"], "gpt-image-2.5-flare")
         self.assertEqual(service.build_provider_config({"oauth_image_model": ""})["oauth_image_model"], "")
         self.assertEqual(service.build_provider_config({"oauth_image_model": "gpt-image-2"})["oauth_image_model"], "gpt-image-2")
-        self.assertEqual(OpenAICodexOAuthService({}).build_provider_config({})["oauth_image_model"], "")
+        self.assertEqual(OpenAICodexOAuthService({}).build_provider_config({})["oauth_image_model"], "gpt-image-2.6-sunburst")
