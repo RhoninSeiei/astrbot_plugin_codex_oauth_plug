@@ -197,9 +197,23 @@ class ProviderResponseValidationTests(unittest.TestCase):
                 self.assertEqual(result.tools_call_name, ["weather"])
                 self.assertEqual(result.tools_call_ids, ["call_1"])
 
-    def test_invalid_tool_arguments_reject_the_completion(self):
+    def test_invalid_tool_arguments_are_preserved_not_rejected(self):
+        # 与原 reject 用例同一组输入矩阵，预期改为降级保留：
+        # 坏参数不让整条 completion 失败，原始内容留给工具执行层裁决。
         missing = object()
-        for arguments in ('{"city":', "[]", "null", "42", '{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}', None, [], missing):
+        cases = (
+            ('{"city":', {"_raw_arguments": '{"city":'}),
+            ("[]", {"_raw_arguments": "[]"}),
+            ("null", {"_raw_arguments": "null"}),
+            ("42", {"_raw_arguments": "42"}),
+            ('{"value":NaN}', {"_raw_arguments": '{"value":NaN}'}),
+            ('{"value":Infinity}', {"_raw_arguments": '{"value":Infinity}'}),
+            ('{"value":-Infinity}', {"_raw_arguments": '{"value":-Infinity}'}),
+            (None, {}),
+            ([], {"_value": []}),
+            (missing, {}),
+        )
+        for arguments, expected in cases:
             with self.subTest(arguments=arguments):
                 item = {
                     "type": "function_call",
@@ -208,8 +222,12 @@ class ProviderResponseValidationTests(unittest.TestCase):
                 }
                 if arguments is not missing:
                     item["arguments"] = arguments
-                with self.assertRaises(Exception):
-                    self.parse_completion({"status": "completed", "output": [item]})
+                result = self.parse_completion(
+                    {"status": "completed", "output": [item]}
+                )
+                self.assertEqual(result.tools_call_args, [expected])
+                self.assertEqual(result.tools_call_name, ["weather"])
+                self.assertEqual(result.tools_call_ids, ["call_bad"])
 
     def test_backend_error_never_echoes_untrusted_error_fields(self):
         secret = "SECRET_PROMPT_ACCESS_TOKEN_8c3e"

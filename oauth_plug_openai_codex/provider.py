@@ -1541,16 +1541,49 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     if isinstance(item, dict)
                     else getattr(item, "arguments", None)
                 )
+                # 工具参数容错：模型偶尔吐出坏参数，整条 completion 判
+                # 失败会连同正常文本与其他工具调用一起丢弃。改为保留
+                # 原始参数并打 warning，让工具执行层看到证据、自行
+                # 裁决，回复不中断。参数缺失按空对象处理。
+                tool_name_for_log = (
+                    item.get("name", "")
+                    if isinstance(item, dict)
+                    else getattr(item, "name", "") or ""
+                )
                 try:
                     parsed_args = json.loads(arguments) if isinstance(arguments, str) else arguments
                 except (ValueError, TypeError):
-                    raise ValueError("Codex tool arguments contain invalid JSON") from None
-                if not isinstance(parsed_args, dict):
-                    raise ValueError("Codex tool arguments must be a JSON object")
-                try:
-                    json.dumps(parsed_args, allow_nan=False)
-                except (ValueError, TypeError):
-                    raise ValueError("Codex tool arguments contain non-JSON values") from None
+                    logger.warning(
+                        "Codex tool %s: invalid JSON arguments (raw length=%d)",
+                        tool_name_for_log,
+                        len(arguments) if isinstance(arguments, str) else -1,
+                    )
+                    parsed_args = {"_raw_arguments": arguments}
+                if isinstance(parsed_args, dict):
+                    try:
+                        json.dumps(parsed_args, allow_nan=False)
+                    except (ValueError, TypeError):
+                        logger.warning(
+                            "Codex tool %s: arguments contain non-JSON values",
+                            tool_name_for_log,
+                        )
+                        parsed_args = (
+                            {"_raw_arguments": arguments}
+                            if isinstance(arguments, str)
+                            else {"_value": parsed_args}
+                        )
+                elif parsed_args is None and arguments is None:
+                    parsed_args = {}
+                else:
+                    logger.warning(
+                        "Codex tool %s: arguments are not a JSON object",
+                        tool_name_for_log,
+                    )
+                    parsed_args = (
+                        {"_raw_arguments": arguments}
+                        if isinstance(arguments, str)
+                        else {"_value": parsed_args}
+                    )
                 tool_args.append(parsed_args)
                 tool_names.append(
                     str(
