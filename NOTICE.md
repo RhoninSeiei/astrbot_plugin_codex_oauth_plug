@@ -27,3 +27,5 @@
 v0.6.0 的 `oauth_plug_openai_codex/rejected_tools.py` 参考 AstrBot 4.29.4 维护版本的 `astrbot/core/provider/oauth/tool_arguments.py`，并增加旧宿主兼容处理；JSON 与 SSE 边界处理同步该版本的修复。
 
 本仓库提供组合版本的对应源代码。分发或修改本版本时，请遵循 LICENSE 中的源码提供、许可及版权声明保留要求。
+
+2026-11-07：上下文预算、源头用量快照及媒体用量处理参考 AstrBot 4.29.4 维护源码 `9cf53162661e5ac98edac59bade9d8a99dcc7cf7`。新增 `context_budget.py` 和 `provider_runtime_compat.py` 中相应改编实现遵循同一 AGPL-3.0 许可；独立插件无需安装该维护核心。

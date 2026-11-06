@@ -36,6 +36,20 @@ class LegacyUsageIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["status"], "completed")
         self.assertEqual(row["stats"]["token_usage"]["output"], 8)
 
+    async def test_legacy_partial_image_usage_survives_aggregate_addition(self):
+        for raw_responses in ([{"input_tokens": 7}], [{"input_tokens": 7}, {"input_tokens": 2, "output_tokens": 3}]):
+            with self.subTest(count=len(raw_responses)):
+                provider = make_provider()
+                provider._request_image_backend = AsyncMock(side_effect=[{"usage": raw, "output": []} for raw in raw_responses])
+                recorded = []
+                async def record(**kwargs):
+                    recorded.append(kwargs)
+                provider._record_provider_stat = record
+                await provider.generate_image("test", n=len(raw_responses))
+                self.assertEqual(len(recorded), 1)
+                self.assertTrue(recorded[0]["usage"].is_partial)
+                self.assertEqual(recorded[0]["usage"].input_other, sum(raw["input_tokens"] for raw in raw_responses))
+
 
 @unittest.skipIf(instrument_provider is None, "Core does not have usage_recorder")
 class CoreUsageIntegrationTests(unittest.IsolatedAsyncioTestCase):

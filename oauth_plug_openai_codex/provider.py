@@ -4,6 +4,7 @@
 """Independent Codex OAuth provider adapted from AstrBot production source."""
 
 import asyncio
+import copy
 import json
 import math
 import time
@@ -35,9 +36,14 @@ from .provider_runtime_compat import (
     provider_oauth_web_search,
     provider_stats_managed_by_agent,
     record_provider_usage,
+    UsageAttemptLedger,
+    current_attempt_ledger,
+    note_failed_attempt,
+    observe_attempt_usage,
     retry_provider_request,
 )
 
+from .context_budget import resolve_context_budget, trim_context_to_budget
 from .headers import build_codex_backend_headers
 from .image_media import decode_result, reference_image_url
 from .rejected_tools import apply_tool_rejections, parse_tool_arguments, rejected_tool_call
@@ -54,6 +60,18 @@ OAUTH_IMAGE_MODEL_ALIASES = frozenset(
     {"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst",
      "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"}
 )
+
+
+@asynccontextmanager
+async def _usage_bound_closing(stream, ledger):
+    try:
+        yield stream
+    finally:
+        token = current_attempt_ledger.set(ledger)
+        try:
+            await stream.aclose()
+        finally:
+            current_attempt_ledger.reset(token)
 
 
 class OpenAIOAuthImageStreamError(RuntimeError):
@@ -236,6 +254,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         patched_config = dict(provider_config)
         patched_config.pop("oauth_shared_state", None)
         patched_config["key"] = [OAUTH_PLACEHOLDER_KEY]
+        self._oauth_context_config = copy.deepcopy({
+            key: provider_config[key] for key in (
+                "max_context_tokens", "max_tokens", "max_completion_tokens",
+                "max_output_tokens", "custom_extra_body",
+            ) if key in provider_config
+        })
         super().__init__(patched_config, provider_settings)
         self.provider_config = dict(provider_config)
         shared_state = self.provider_config.pop("oauth_shared_state", None)
@@ -270,6 +294,11 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         self._sync_oauth_credentials_from_shared()
         if service is not None:
             service.register_provider(self)
+
+    async def get_model_context_metadata(self, model: str) -> dict[str, int]:
+        from .model_catalog import get_model_context_metadata
+
+        return await get_model_context_metadata(self, model)
 
     async def get_models(self):
         from .model_catalog import discover_models
@@ -478,8 +507,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         status_code, text, attempted_version = await self._request_backend_once(payload)
 
         if status_code in {401, 403}:
+            auth_error = self._http_response_error(status_code, text)
             refreshed = await self._refresh_after_auth_failure(attempted_version)
             if refreshed:
+                note_failed_attempt(auth_error)
+                ledger = current_attempt_ledger.get()
+                if ledger is not None:
+                    ledger.begin_attempt()
                 (
                     status_code,
                     text,
@@ -487,11 +521,9 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 ) = await self._request_backend_once(payload)
 
         if status_code < 200 or status_code >= 300:
-            raise ProviderRequestError(
-                self._format_backend_error(status_code, text),
-                status_code=status_code,
-            )
+            raise self._http_response_error(status_code, text)
         return self._parse_backend_response(text)
+
 
     @asynccontextmanager
     async def _open_oauth_http_client(
@@ -542,39 +574,69 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 ) as response:
                     if response.status_code == 401 and auth_retry_available:
                         raw_body = await response.aread()
+                        text = raw_body.decode("utf-8", errors="replace")
+                        auth_error = self._http_response_error(
+                            response.status_code, text
+                        )
                         refreshed = await self._refresh_after_auth_failure(
                             attempted_version
                         )
                         if refreshed:
+                            note_failed_attempt(auth_error)
+                            ledger = current_attempt_ledger.get()
+                            if ledger is not None:
+                                ledger.begin_attempt()
                             auth_retry_available = False
                             retry_after_auth = True
                         else:
-                            text = raw_body.decode("utf-8", errors="replace")
-                            raise ProviderRequestError(
-                                self._format_backend_error(response.status_code, text),
-                                status_code=response.status_code,
-                            )
+                            raise auth_error
                     elif response.status_code < 200 or response.status_code >= 300:
                         raw_body = await response.aread()
                         text = raw_body.decode("utf-8", errors="replace")
-                        raise ProviderRequestError(
-                            self._format_backend_error(response.status_code, text),
-                            status_code=response.status_code,
-                        )
+                        raise self._http_response_error(response.status_code, text)
                     else:
-                        async for event in iter_json_sse_events(response.aiter_lines()):
-                            yield event
-                            if event.get("type") in {
-                                "response.completed",
-                                "response.error",
-                                "response.failed",
-                                "response.incomplete",
-                                "error",
-                            }:
-                                return
+                        try:
+                            async for event in iter_json_sse_events(
+                                response.aiter_lines()
+                            ):
+                                event_payload = event.get("response")
+                                event_payload = (
+                                    event_payload
+                                    if isinstance(event_payload, dict)
+                                    else event
+                                )
+                                self._observe_backend_usage(
+                                    event_payload,
+                                    response_id=event.get("response_id"),
+                                    complete=event.get("type")
+                                    in {
+                                        "response.completed",
+                                        "response.failed",
+                                        "response.incomplete",
+                                        "response.error",
+                                        "error",
+                                    },
+                                )
+                                yield event
+                                if event.get("type") in {
+                                    "response.completed",
+                                    "response.error",
+                                    "response.failed",
+                                    "response.incomplete",
+                                    "error",
+                                }:
+                                    return
+                        except ValueError:
+                            logger.warning(
+                                "Codex backend SSE rejected 1 invalid event."
+                            )
+                            raise ValueError(
+                                "Codex backend SSE event is invalid."
+                            ) from None
             if retry_after_auth:
                 continue
             return
+
 
     async def _request_image_backend_once(
         self,
@@ -610,6 +672,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                             captured_lines(), max_event_bytes=IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES,
                         )) as events:
                             async for event in events:
+                                event_payload = event.get("response")
+                                event_payload = event_payload if isinstance(event_payload, dict) else event
+                                self._observe_backend_usage(
+                                    event_payload, response_id=event.get("response_id"),
+                                    complete=event.get("type") in {"response.completed", "response.failed", "response.incomplete", "response.error", "error"},
+                                )
                                 if event.get("type") in {
                                     "response.completed", "response.error", "response.failed",
                                     "response.incomplete", "error",
@@ -638,8 +706,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             status_code, text, attempted_version = first_result
 
         if status_code in {401, 403}:
+            auth_error = self._http_response_error(status_code, text)
             refreshed = await self._refresh_after_auth_failure(attempted_version)
             if refreshed:
+                note_failed_attempt(auth_error)
+                ledger = current_attempt_ledger.get()
+                if ledger is not None:
+                    ledger.begin_attempt()
                 retry_result = await self._request_image_backend_once(
                     payload,
                     request_timeout,
@@ -647,10 +720,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 status_code, text = retry_result[:2]
 
         if status_code < 200 or status_code >= 300:
-            raise ProviderRequestError(
-                self._format_backend_error(status_code, text),
-                status_code=status_code,
-            )
+            raise self._http_response_error(status_code, text)
         return self._parse_backend_response(text)
 
     async def _request_image_backend_websocket(
@@ -750,6 +820,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                                     raise OpenAIOAuthImageStreamError("outcome_unknown")
                                 lines.append("data: " + json.dumps(event, ensure_ascii=False, separators=(",", ":")))
                                 event_type = event.get("type")
+                                event_payload = event.get("response")
+                                self._observe_backend_usage(
+                                    event_payload if isinstance(event_payload, dict) else event,
+                                    response_id=event.get("response_id"),
+                                    complete=event_type in {"response.completed", "response.failed", "response.incomplete", "response.error", "error"},
+                                )
                                 if event_type in {
                                     "error",
                                     "response.error",
@@ -852,18 +928,30 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         error = ProviderRequestError(message, status_code=status_code) if status_code is not None else RuntimeError(message)
         payload = data.get("response", data) if isinstance(data, dict) else {}
         if isinstance(payload, dict):
+            self._observe_backend_usage(payload, complete=True, response_id=data.get("response_id"))
             usage = self._extract_response_usage(payload.get("usage"))
             if usage is not None:
                 setattr(error, "_astrbot_token_usage", usage)
         return error
 
-    @staticmethod
-    def _buffered_sse_events(text: str):
+    def _buffered_sse_events(self, text: str):
+        observed_usage = None
         try:
-            yield from iter_json_sse_text(text, max_event_bytes=IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES)
+            for event in iter_json_sse_text(text, max_event_bytes=IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES):
+                payload = event.get("response")
+                payload = payload if isinstance(payload, dict) else event
+                complete = event.get("type") in {"response.completed", "response.failed", "response.incomplete", "response.error", "error"}
+                usage = self._extract_response_usage(payload.get("usage"))
+                if usage is not None:
+                    observed_usage = usage if complete else self._partial_usage(usage)
+                self._observe_backend_usage(payload, complete=complete, response_id=event.get("response_id"))
+                yield event
         except ValueError:
             logger.warning("Codex backend SSE rejected 1 invalid event.")
-            raise ValueError("Codex backend SSE event is invalid.") from None
+            error = ValueError("Codex backend SSE event is invalid.")
+            if observed_usage is not None:
+                error._astrbot_token_usage = observed_usage
+            raise error from None
 
     def _format_backend_error(self, status_code: int, text: str) -> str:
         try:
@@ -1080,37 +1168,44 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
     def _extract_response_usage(self, usage: Any) -> TokenUsage | None:
         if usage is None:
             return None
-        getter = (
-            usage.get
-            if isinstance(usage, dict)
-            else lambda key: getattr(usage, key, None)
-        )
-        known_input = getter("input_tokens") is not None
-        known_output = getter("output_tokens") is not None
+        getter = usage.get if isinstance(usage, dict) else lambda key: getattr(usage, key, None)
+        raw_input, raw_output = getter("input_tokens"), getter("output_tokens")
+        known_input, known_output = raw_input is not None, raw_output is not None
         if not known_input and not known_output:
             return None
-        if isinstance(usage, dict):
-            input_tokens = int(usage.get("input_tokens", 0) or 0)
-            output_tokens = int(usage.get("output_tokens", 0) or 0)
-            details = usage.get("input_tokens_details") or {}
-            cached_tokens = int(details.get("cached_tokens", 0) or 0)
-        else:
-            input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
-            output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-            details = getattr(usage, "input_tokens_details", None)
-            cached_tokens = int(getattr(details, "cached_tokens", 0) or 0)
-        values = {
-            "input_other": max(0, input_tokens - cached_tokens),
-            "input_cached": cached_tokens,
-            "output": output_tokens,
-        }
+        for value in (raw_input, raw_output):
+            if value is not None and (type(value) is not int or not 0 <= value <= 2**63 - 1):
+                return None
+        details = getter("input_tokens_details")
+        cached = (details.get("cached_tokens") if isinstance(details, dict) else getattr(details, "cached_tokens", None)) if details is not None else None
+        cached = cached if known_input and cached is not None else 0
+        if type(cached) is not int or cached < 0 or (known_input and cached > raw_input):
+            return None
+        values = {"input_other": (raw_input or 0) - cached, "input_cached": cached, "output": raw_output or 0}
         try:
-            return TokenUsage(
-                **values,
-                is_partial=not (known_input and known_output),
-            )
+            return TokenUsage(**values, is_partial=not (known_input and known_output))
         except TypeError:
-            return TokenUsage(**values)
+            result = TokenUsage(**values)
+            try:
+                result.is_partial = not (known_input and known_output)
+            except (AttributeError, TypeError):
+                pass
+            return result
+
+    @staticmethod
+    def _partial_usage(usage: TokenUsage | None) -> TokenUsage | None:
+        if usage is None:
+            return None
+        values = {"input_other": usage.input_other, "input_cached": usage.input_cached, "output": usage.output}
+        try:
+            return TokenUsage(**values, is_partial=True)
+        except TypeError:
+            result = TokenUsage(**values)
+            try:
+                result.is_partial = True
+            except (AttributeError, TypeError):
+                pass
+            return result
 
     async def _record_provider_stat(
         self,
@@ -1134,10 +1229,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             model: Explicit request model when supplied.
             session_id: Session identifier when supplied by the caller.
         """
-        if getattr(self, "_usage_recording_enabled", False):
+        if getattr(self, "_usage_recording_enabled", False) or request_kind == "transcription":
             recorded = await record_provider_usage(
                 self,
-                self._usage_recording_db,
+                getattr(self, "_usage_recording_db", db_helper),
                 usage=usage,
                 status=status,
                 start_time=start_time,
@@ -1164,11 +1259,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 provider_model=model or self.get_model(),
                 status=status,
                 stats={
-                    "token_usage": {
-                        "input_other": usage.input_other if usage else 0,
-                        "input_cached": usage.input_cached if usage else 0,
-                        "output": usage.output if usage else 0,
-                    },
+                    "token_usage": ({
+                        "input_other": usage.input_other,
+                        "input_cached": usage.input_cached,
+                        "output": usage.output,
+                    } if usage is not None else {}),
+                    "usage_status": "missing" if usage is None else ("partial" if getattr(usage, "is_partial", False) else "reported"),
                     "start_time": start_time,
                     "end_time": end_time,
                     "time_to_first_token": 0.0,
@@ -1728,6 +1824,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             Exception: Re-raises the original provider exception unchanged.
         """
         managed_by_agent = provider_stats_managed_by_agent.get()
+        ledger = current_attempt_ledger.get()
+        if (
+            not getattr(self, "_usage_recording_enabled", False)
+            or ledger is None or ledger.provider_key != id(self)
+        ):
+            ledger = UsageAttemptLedger(id(self))
+        ledger_token = current_attempt_ledger.set(ledger)
         request_kind = oauth_provider_stat_kind.get()
         start_time = time.time()
         kwargs["_oauth_tool_choice"] = tool_choice
@@ -1749,12 +1852,14 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 oauth_web_search=oauth_web_search,
                 **kwargs,
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             if not managed_by_agent:
                 await self._record_provider_stat(
                     request_kind=request_kind,
-                    status="error",
-                    usage=None,
+                    status="error" if request_kind == "test" else "aborted",
+                    usage=ledger.combined(
+                        getattr(exc, "_astrbot_token_usage", None), exc
+                    ),
                     start_time=start_time,
                     end_time=time.time(),
                     model=model,
@@ -1766,25 +1871,103 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 await self._record_provider_stat(
                     request_kind=request_kind,
                     status="error",
-                    usage=getattr(exc, "_astrbot_token_usage", None),
+                    usage=ledger.combined(
+                        getattr(exc, "_astrbot_token_usage", None), exc
+                    ),
                     start_time=start_time,
                     end_time=time.time(),
                     model=model,
                     session_id=session_id,
                 )
             raise
+        finally:
+            current_attempt_ledger.reset(ledger_token)
 
         if not managed_by_agent:
             await self._record_provider_stat(
                 request_kind=request_kind,
                 status="error" if response.role == "err" else "completed",
-                usage=response.usage,
+                usage=ledger.combined(response.usage),
                 start_time=start_time,
                 end_time=time.time(),
                 model=model,
                 session_id=session_id,
             )
         return response
+
+
+    def _http_response_error(self, status_code: int, text: str) -> ProviderRequestError:
+        """Preserve actual error-body counters without exposing its raw body.
+
+        Args:
+            status_code: HTTP status returned by the backend.
+            text: Untrusted response body, used only for safe classification.
+
+        Returns:
+            Sanitized exception carrying optional reported usage and model.
+        """
+        error = ProviderRequestError(
+            self._format_backend_error(status_code, text), status_code=status_code
+        )
+        try:
+            data = json.loads(text)
+        except (TypeError, ValueError):
+            return error
+        if isinstance(data, dict):
+            payload = data.get("response")
+            payload = payload if isinstance(payload, dict) else data
+            self._observe_backend_usage(
+                payload, complete=True, response_id=data.get("response_id")
+            )
+            usage = self._extract_response_usage(payload.get("usage"))
+            if usage is not None:
+                error._astrbot_token_usage = usage
+            if isinstance(payload.get("model"), str):
+                error._astrbot_provider_model = payload["model"]
+        return error
+
+
+    def _observe_backend_usage(
+        self, payload: Any, *, complete: bool, response_id: str | None = None
+    ) -> None:
+        """Forward only raw reported directions to the request-local usage sink.
+
+        Args:
+            payload: Backend response or event body with a raw usage object.
+            complete: Whether a terminal response supplied the counters.
+            response_id: Explicit enclosing event response identity, if present.
+        """
+        if not isinstance(payload, dict):
+            return
+        raw = payload.get("usage")
+        if not isinstance(raw, dict):
+            return
+        observe_attempt_usage(
+            self._extract_response_usage(raw),
+            complete=complete,
+            response_id=response_id or payload.get("response_id") or payload.get("id"),
+            reported_fields=frozenset(
+                direction
+                for direction in ("input", "output")
+                if raw.get(f"{direction}_tokens") is not None
+            ),
+        )
+
+
+    async def _handle_api_error(self, error, *args, **kwargs):
+        """Observe inherited compatibility retries without changing retry policy.
+
+        Args:
+            error: Exception from the attempted OAuth request.
+            *args: Inherited retry handler arguments.
+            **kwargs: Inherited retry handler options.
+
+        Returns:
+            The inherited retry decision and adjusted payload.
+        """
+        note_failed_attempt(error)
+        return await super()._handle_api_error(error, *args, **kwargs)
+
 
     async def test(self, timeout: float = 45.0) -> None:
         token = oauth_provider_stat_kind.set("test")
@@ -1804,7 +1987,6 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         oauth_web_search: str | None = None,
         **_extra: Any,
     ) -> LLMResponse:
-        # Ignore unknown keyword arguments from future AstrBot core versions.
         if retry_rate_limits is None:
             retry_rate_limits = payloads.get("_oauth_retry_rate_limits")
         params = self._build_responses_params(
@@ -1812,15 +1994,18 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             tools,
             oauth_web_search=oauth_web_search,
         )
+        budget = await resolve_context_budget(self, model=params["model"])
+        params = trim_context_to_budget(params, budget)
         response = await retry_provider_request(
             "OpenAI OAuth",
             lambda: self._request_backend(params),
             retry_rate_limits=retry_rate_limits,
             max_attempts=request_max_retries,
         )
+        self._observe_backend_usage(response, complete=True)
         try:
             return await self._parse_responses_completion(response, tools)
-        except Exception as exc:
+        except BaseException as exc:
             usage = self._extract_response_usage(
                 response.get("usage")
                 if isinstance(response, dict)
@@ -1828,7 +2013,9 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             )
             if usage is not None:
                 setattr(exc, "_astrbot_token_usage", usage)
+            note_failed_attempt(exc, new_attempt=True)
             raise
+
 
     async def _query_stream(
         self,
@@ -1841,13 +2028,14 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         oauth_web_search: str | None = None,
         **_extra: Any,
     ) -> AsyncGenerator[LLMResponse, None]:
-        # Ignore unknown keyword arguments from future AstrBot core versions.
         del request_max_retries, retry_rate_limits
         params = self._build_responses_params(
             payloads,
             tools,
             oauth_web_search=oauth_web_search,
         )
+        budget = await resolve_context_budget(self, model=params["model"])
+        params = trim_context_to_budget(params, budget)
         output_text_parts: list[str] = []
         reasoning_parts: list[str] = []
         output_items: dict[str, dict[str, Any]] = {}
@@ -1889,9 +2077,17 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     }
                 )
                 completed_response["output"] = existing_output
-        final_response = await self._parse_responses_completion(
-            completed_response, tools
-        )
+        self._observe_backend_usage(completed_response, complete=True)
+        try:
+            final_response = await self._parse_responses_completion(
+                completed_response, tools
+            )
+        except BaseException as exc:
+            usage = self._extract_response_usage(completed_response.get("usage"))
+            if usage is not None:
+                setattr(exc, "_astrbot_token_usage", usage)
+            note_failed_attempt(exc, new_attempt=True)
+            raise
         if not output_text_parts and final_response.completion_text:
             yield LLMResponse(
                 role="assistant",
@@ -1910,6 +2106,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     is_chunk=True,
                 )
         yield final_response
+
 
     def _apply_stream_event(
         self,
@@ -2113,7 +2310,8 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             raise ValueError("当前 Codex OAuth 后端不支持 GIF 输出；不会自动改为 PNG。")
 
         start_time = time.time()
-        total_usage = TokenUsage()
+        total_usage = None
+        missing_image_usage = False
         try:
             references = [
                 str(image).strip()
@@ -2155,6 +2353,9 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 }
                 image_start = time.time()
                 response_usage = None
+                image_ledger = UsageAttemptLedger(id(self))
+                ledger_token = current_attempt_ledger.set(image_ledger)
+                image_error = None
                 image_status = "completed"
                 response: dict[str, Any] = {}
                 try:
@@ -2174,23 +2375,35 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     response_usage = self._extract_response_usage(
                         response.get("usage")
                     )
-                    if response_usage is not None:
-                        total_usage = total_usage + response_usage
+                    self._observe_backend_usage(response, complete=True)
                     if output_format is None:
                         results.extend(await self._extract_generated_images(response))
                     else:
                         results.extend(await self._extract_generated_images(response, expected_format=output_format))
-                except asyncio.CancelledError:
+                except asyncio.CancelledError as exc:
+                    image_error = exc
+                    if response_usage is None:
+                        response_usage = getattr(exc, "_astrbot_token_usage", None)
                     image_status = "aborted"
                     raise
                 except Exception as exc:
+                    image_error = exc
                     image_status = "error"
                     if response_usage is None:
                         response_usage = getattr(exc, "_astrbot_token_usage", None)
-                        if response_usage is not None:
-                            total_usage = total_usage + response_usage
                     raise
                 finally:
+                    current_attempt_ledger.reset(ledger_token)
+                    response_usage = image_ledger.combined(response_usage, image_error)
+                    if response_usage is None:
+                        missing_image_usage = True
+                    else:
+                        partial_total = getattr(total_usage, "is_partial", False) or getattr(response_usage, "is_partial", False)
+                        total_usage = (total_usage or TokenUsage()) + response_usage
+                        if partial_total:
+                            total_usage = self._partial_usage(total_usage)
+                    if missing_image_usage and total_usage is not None:
+                        total_usage = self._partial_usage(total_usage)
                     if getattr(self, "_usage_recording_enabled", False):
                         await self._record_provider_stat(
                             request_kind="image",
@@ -2198,18 +2411,21 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                             usage=response_usage,
                             start_time=image_start,
                             end_time=time.time(),
-                            model=response.get("model") or model,
+                            model=response.get("model") or getattr(image_error, "_astrbot_provider_model", None) or model,
                         )
-        except (Exception, asyncio.CancelledError):
+                        if image_error is not None:
+                            image_error._astrbot_usage_recorded = True
+        except (Exception, asyncio.CancelledError) as exc:
             if not getattr(self, "_usage_recording_enabled", False):
                 await self._record_provider_stat(
                     request_kind="image",
-                    status="error",
+                    status="aborted" if isinstance(exc, asyncio.CancelledError) else "error",
                     usage=total_usage,
                     start_time=start_time,
                     end_time=time.time(),
                     model=model,
                 )
+                exc._astrbot_usage_recorded = True
             raise
 
         if not getattr(self, "_usage_recording_enabled", False):
@@ -2343,6 +2559,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         **kwargs,
     ) -> AsyncGenerator[LLMResponse, None]:
         extra_user_content_parts = kwargs.pop("extra_user_content_parts", None)
+        conversation_id = kwargs.pop("conversation_id", None)
         payloads, _context_query = await self._prepare_chat_payload(
             prompt,
             image_urls,
@@ -2361,26 +2578,46 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         request_kind = oauth_provider_stat_kind.get()
         start_time = time.time()
         final_response: LLMResponse | None = None
+        ledger = current_attempt_ledger.get()
+        if (
+            not getattr(self, "_usage_recording_enabled", False)
+            or ledger is None or ledger.provider_key != id(self)
+        ):
+            ledger = UsageAttemptLedger(id(self))
         try:
-            async with aclosing(
+            query_kwargs = {}
+            if conversation_id:
+                query_kwargs["conversation_id"] = conversation_id
+            async with _usage_bound_closing(
                 self._query_stream(
                     payloads,
                     func_tool,
+                    **query_kwargs,
                     request_max_retries=request_max_retries,
                     retry_rate_limits=retry_rate_limits,
                     oauth_web_search=oauth_web_search,
-                )
+                ),
+                ledger,
             ) as response_stream:
-                async for response in response_stream:
+                while True:
+                    ledger_token = current_attempt_ledger.set(ledger)
+                    try:
+                        response = await anext(response_stream)
+                    except StopAsyncIteration:
+                        break
+                    finally:
+                        current_attempt_ledger.reset(ledger_token)
                     if not response.is_chunk:
                         final_response = response
                     yield response
-        except (asyncio.CancelledError, GeneratorExit):
+        except (asyncio.CancelledError, GeneratorExit) as exc:
             if not managed_by_agent:
                 await self._record_provider_stat(
                     request_kind=request_kind,
-                    status="error",
-                    usage=None,
+                    status="error" if request_kind == "test" else "aborted",
+                    usage=ledger.combined(
+                        getattr(exc, "_astrbot_token_usage", None), exc
+                    ),
                     start_time=start_time,
                     end_time=time.time(),
                     model=model,
@@ -2392,7 +2629,9 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 await self._record_provider_stat(
                     request_kind=request_kind,
                     status="error",
-                    usage=getattr(exc, "_astrbot_token_usage", None),
+                    usage=ledger.combined(
+                        getattr(exc, "_astrbot_token_usage", None), exc
+                    ),
                     start_time=start_time,
                     end_time=time.time(),
                     model=model,
@@ -2406,7 +2645,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             await self._record_provider_stat(
                 request_kind=request_kind,
                 status="error" if final_response.role == "err" else "completed",
-                usage=final_response.usage,
+                usage=ledger.combined(final_response.usage),
                 start_time=start_time,
                 end_time=time.time(),
                 model=model,

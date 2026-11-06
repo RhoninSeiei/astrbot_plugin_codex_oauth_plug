@@ -4,6 +4,7 @@
 """Adapted from AstrBot's openai_oauth_realtime implementation."""
 
 import asyncio
+import hashlib
 import json
 import re
 import time
@@ -16,7 +17,11 @@ from urllib.parse import urlsplit
 import httpx
 from websockets.asyncio.client import connect
 
-from .provider_runtime_compat import ProviderRequestError
+from astrbot import logger
+
+from .provider_runtime_compat import (
+    ProviderRequestError, capture_usage_context, record_provider_usage,
+)
 
 REALTIME_CALL_URL = (
     "https://chatgpt.com/backend-api/codex/realtime/calls"
@@ -128,6 +133,11 @@ class OpenAIOAuthRealtimeSession:
         self._active_delegation_id = ""
         self._completed_delegations: set[str] = set()
         self._seen_delegations: set[str] = set()
+        self._usage_context = capture_usage_context()
+        self._usage_session_id = uuid.uuid4().hex
+        self._usage_tasks: set[asyncio.Task] = set()
+        self._usage_lock = asyncio.Lock()
+        self._usage_unavailable_warned = False
         self._reader_task = asyncio.create_task(self._reader())
         self._lifecycle_task = asyncio.create_task(self._watch_lifecycle())
 
@@ -266,6 +276,8 @@ class OpenAIOAuthRealtimeSession:
                 if not isinstance(event, dict):
                     continue
                 event_type = str(event.get("type") or "")
+                if event_type in {"response.done", "turn.done"}:
+                    await self._record_done_usage(event)
                 if event_type in {
                     "input_transcript.added",
                     "output_transcript.added",
@@ -310,6 +322,87 @@ class OpenAIOAuthRealtimeSession:
             terminal_error = True
         finally:
             await self._close(send_close=terminal_error)
+
+    async def _record_done_usage(self, event: dict[str, Any]) -> None:
+        """Persist only explicitly identified terminal response snapshots.
+
+        Args:
+            event: A response.done or turn.done event, never a session total.
+        """
+        provider = self._client.oauth_provider
+        if not getattr(provider, "_usage_recording_enabled", False):
+            return
+        payload = (
+            event.get("response")
+            if event.get("type") == "response.done"
+            else event.get("turn")
+        )
+        if not isinstance(payload, dict):
+            return
+        identifier = (
+            event.get("response_id") or payload.get("response_id") or payload.get("id")
+        )
+        if not isinstance(identifier, str) or not identifier or len(identifier) > 256:
+            return
+        extractor = getattr(provider, "_extract_response_usage", None)
+        usage = extractor(payload.get("usage")) if extractor is not None else None
+        raw_usage = payload.get("usage")
+        fields = frozenset(
+            direction
+            for direction in ("input", "output")
+            if isinstance(raw_usage, dict)
+            and raw_usage.get(f"{direction}_tokens") is not None
+        )
+        if isinstance(payload.get("model"), str):
+            fields |= {"model"}
+        state = payload.get("status")
+        status = (
+            "aborted"
+            if state == "cancelled"
+            else "error"
+            if state in {"failed", "incomplete"}
+            else "completed"
+        )
+        now = time.time()
+        if len(self._usage_tasks) >= self._client.event_queue_size:
+            logger.warning(
+                "Realtime usage backlog is full; a snapshot could not be persisted."
+            )
+            return
+
+        async def persist():
+            async with self._usage_lock:
+                try:
+                    recorded = await asyncio.wait_for(
+                        record_provider_usage(
+                            provider,
+                            provider._usage_recording_db,
+                            usage=usage,
+                            status=status,
+                            start_time=now,
+                            end_time=now,
+                            request_kind="realtime",
+                            model=payload.get("model")
+                            if isinstance(payload.get("model"), str)
+                            else REALTIME_MODEL,
+                            request_id=f"oauth-realtime-snapshot:{self._usage_session_id}:{hashlib.sha256(identifier.encode()).hexdigest()}",
+                            replace_snapshot=True,
+                            usage_snapshot_fields=fields,
+                            _context=self._usage_context,
+                        ),
+                        timeout=min(2.0, self._client.close_timeout),
+                    )
+                    if not recorded and not self._usage_unavailable_warned:
+                        self._usage_unavailable_warned = True
+                        logger.warning("Realtime usage snapshot updates are unavailable in this host; skipped.")
+                except TimeoutError:
+                    logger.warning("Realtime usage snapshot persistence timed out.")
+                except Exception:
+                    logger.warning("Realtime usage snapshot persistence failed.")
+
+        task = asyncio.create_task(persist())
+        self._usage_tasks.add(task)
+        task.add_done_callback(self._usage_tasks.discard)
 
     def _handle_delegation(self, event: dict[str, Any]) -> None:
         item = event.get("item")
@@ -398,6 +491,15 @@ class OpenAIOAuthRealtimeSession:
             except Exception:
                 pass
             await asyncio.gather(*tasks, return_exceptions=True)
+            if self._usage_tasks:
+                _, pending = await asyncio.wait(
+                    tuple(self._usage_tasks), timeout=self._client.close_timeout
+                )
+                if pending:
+                    logger.warning("Realtime usage drain timed out; pending writes were cancelled.")
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.wait(pending, timeout=min(0.1, self._client.close_timeout))
         finally:
             self._client._release_session(self)
             try:

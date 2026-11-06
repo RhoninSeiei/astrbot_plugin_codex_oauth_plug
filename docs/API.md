@@ -154,3 +154,13 @@ Realtime 需要 `websockets>=15` 的 asyncio 客户端支持，且账号必须�
 | `/api/plug/oauth-plug-openai-codex/disconnect` | `{}` | 清除插件授权。 |
 
 检查返回体的 `status` 和 `message`，不能仅凭 HTTP 200 判断业务成功。授权链接、回调、JSON 凭据和响应中的账号信息不得写入公开日志。
+
+## 上下文预算边界
+
+普通 AstrBot 无需安装定制核心。`get_model_context_metadata(model)` 异步返回账号目录中有效的 `context_window` 和 `max_context_window`；缺失时返回空字典。
+
+`text_chat()`、`text_chat_stream()` 及由宿主主聊天或 `Context.tool_loop_agent()` 最终发出的提供商请求，都在发送前检查完整 Responses payload。检查使用实例创建时保存的预算配置，避免宿主自动推导写回将 `0` 改成手动模式。修改窗口设置后应由宿主重建提供商。
+
+此检查只裁剪旧完整轮次，不调用额外模型生成摘要，不修改调用方历史。不可裁剪的内容超限时抛出插件的 `ContextBudgetExceeded`。官方 runner 在提供商调用前的压缩策略仍由 AstrBot 管理；插件不能恢复已被宿主删除的历史，也不承诺不同模型 fallback 的上游历史隔离。
+
+`LLMResponse.usage` 保留最终响应实际报告的用量。请求内失败重试的用量只用于统计合计，不混入最终响应。部分字段和缺失用量在旧宿主的显示方式由其 `TokenUsage` 与统计接口决定。实时音频仅在宿主提供明确快照更新接口时写入统计，不建立额外数据库。
