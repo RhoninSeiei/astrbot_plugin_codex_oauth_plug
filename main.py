@@ -5,6 +5,7 @@ import json
 
 from quart import request
 
+from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
@@ -18,6 +19,7 @@ try:
         unregister_provider_adapter,
     )
     from .oauth_plug_openai_codex.service import (
+        PROVIDER_TYPE,
         OpenAICodexOAuthService,
         get_service,
         set_service,
@@ -31,6 +33,7 @@ except ImportError:
         unregister_provider_adapter,
     )
     from oauth_plug_openai_codex.service import (
+        PROVIDER_TYPE,
         OpenAICodexOAuthService,
         get_service,
         set_service,
@@ -54,6 +57,7 @@ class OAuthPlugOpenAICodexPlugin(Star):
         set_service(self.service)
         if self.service.is_enabled():
             register_provider_adapter()
+            await self._reconcile_providers(rebuild=True)
         self.context.register_web_api(
             "oauth-plug-openai-codex/start",
             self.api_start,
@@ -86,6 +90,7 @@ class OAuthPlugOpenAICodexPlugin(Star):
         )
 
     async def terminate(self) -> None:
+        await self._reconcile_providers(rebuild=False)
         try:
             try:
                 await self.usage_service.close()
@@ -96,6 +101,74 @@ class OAuthPlugOpenAICodexPlugin(Star):
             if get_service() is self.service:
                 set_service(None)
                 unregister_provider_adapter()
+
+    async def _reconcile_providers(self, *, rebuild: bool) -> None:
+        """Keep the core cache in step with the OAuth service generation."""
+        try:
+            manager = getattr(self.context, "provider_manager", None)
+            if manager is None:
+                return
+            # Core loads plugins before ProviderManager.initialize(), which loads
+            # every config itself. Its MCP task is assigned only after that pass.
+            if rebuild and getattr(manager, "_mcp_init_task", None) is None:
+                return
+            async with manager.reload_lock:
+                def owned(instance):
+                    config = getattr(instance, "provider_config", {})
+                    return config.get("type") == PROVIDER_TYPE
+
+                async def evict(provider_id, instance):
+                    try:
+                        await manager.terminate_provider(provider_id)
+                    except Exception:
+                        logger.exception("OAuth provider eviction failed: %s", provider_id)
+                    finally:
+                        # Core removes only one list occurrence and deletes the
+                        # map entry only after successful resource termination.
+                        manager.provider_insts[:] = [
+                            item for item in manager.provider_insts if item is not instance
+                        ]
+                        if manager.curr_provider_inst is instance:
+                            manager.curr_provider_inst = None
+                        if manager.inst_map.get(provider_id) is instance:
+                            manager.inst_map.pop(provider_id, None)
+
+                for provider_id, instance in list(manager.inst_map.items()):
+                    if owned(instance) and (
+                        not rebuild
+                        or getattr(instance, "_oauth_service", None) is not self.service
+                    ):
+                        await evict(provider_id, instance)
+                # A previous load_provider() over an existing ID can leave
+                # list-only objects. Give each orphan a temporary unused map key
+                # so even these pass through the manager's termination API.
+                for instance in list(manager.provider_insts):
+                    if not owned(instance) or any(
+                        item is instance for item in manager.inst_map.values()
+                    ):
+                        continue
+                    provider_id = f"__oauth_retired_{id(instance)}"
+                    while provider_id in manager.inst_map:
+                        provider_id += "_"
+                    manager.inst_map[provider_id] = instance
+                    await evict(provider_id, instance)
+                if not rebuild:
+                    return
+                for config in manager.providers_config:
+                    try:
+                        merged = manager.get_merged_provider_config(config)
+                        if merged.get("type") != PROVIDER_TYPE or not merged.get("enable"):
+                            continue
+                        provider_id = merged["id"]
+                        # Never overwrite a foreign instance, or append a second
+                        # copy on repeated initialize/config entries.
+                        if provider_id in manager.inst_map:
+                            continue
+                        await manager.load_provider(config)
+                    except Exception:
+                        logger.exception("OAuth provider rebuild failed")
+        except Exception:
+            logger.exception("OAuth provider lifecycle reconciliation failed")
 
     def _remove_owned_web_apis(self, *, include_previous_instances=False) -> None:
         routes = getattr(self.context, "registered_web_apis", None)
