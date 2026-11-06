@@ -1273,6 +1273,23 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         return [tool]
 
     @staticmethod
+    def _input_mentions_json(value) -> bool:
+        if isinstance(value, str):
+            return "json" in value.lower()
+        if isinstance(value, dict):
+            return any(
+                ProviderOAuthPlugOpenAICodex._input_mentions_json(item)
+                for key, item in value.items()
+                if key in {"text", "content"}
+            )
+        if isinstance(value, (list, tuple)):
+            return any(
+                ProviderOAuthPlugOpenAICodex._input_mentions_json(item)
+                for item in value
+            )
+        return False
+
+    @staticmethod
     def _is_managed_web_search_tool(tool: dict[str, Any]) -> bool:
         return str(tool.get("type") or "").strip().lower() in {
             "web_search",
@@ -1347,6 +1364,54 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             if not isinstance(text_config, dict):
                 raise ValueError("text must be an object")
             params["text"] = {**text_config, "format": merged_format}
+            if format_type == "json_object":
+                # Codex 后端要求 json_object 请求的输入消息里出现过 "json"
+                # 字样，否则以 invalid_request_error 秒拒；只补在
+                # instructions 里过不了关，后端的扫描只认 input 消息条目。
+                # 结构化输出的调用方不保证提示词里有这个词，故在消息正文
+                # 通篇没提 json 时往最后一条用户消息后附一个格式说明
+                # 文本段兜底（无用户消息时退到最后一条消息，再没有就
+                # 新建一条用户消息）；已提到时不做任何改动。
+                note = "Output format: json."
+                message_items = [
+                    item
+                    for item in backend_input
+                    if isinstance(item, dict) and item.get("type") == "message"
+                ]
+                if not any(
+                    ProviderOAuthPlugOpenAICodex._input_mentions_json(item)
+                    for item in message_items
+                ):
+                    if "json" not in (instructions or "").lower():
+                        params["instructions"] = (
+                            f"{instructions}\n{note}" if instructions else note
+                        )
+                    target_item = None
+                    for item in reversed(message_items):
+                        if item.get("role") == "user":
+                            target_item = item
+                            break
+                    if target_item is None and message_items:
+                        target_item = message_items[-1]
+                    if target_item is None:
+                        backend_input.append(
+                            {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": note}],
+                            }
+                        )
+                    else:
+                        content = target_item.get("content")
+                        if isinstance(content, list):
+                            part_type = "input_text"
+                            for part in content:
+                                if isinstance(part, dict) and part.get("type"):
+                                    part_type = str(part["type"])
+                                    break
+                            content.append({"type": part_type, "text": note})
+                        elif isinstance(content, str):
+                            target_item["content"] = f"{content}\n{note}"
 
         request_search_mode = str(oauth_web_search or "inherit").strip().lower()
         if request_search_mode not in {"inherit", "disabled", "cached", "live"}:
