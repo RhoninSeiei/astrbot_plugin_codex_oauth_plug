@@ -1,0 +1,59 @@
+name: Official AstrBot CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: official-astrbot-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  official-astrbot:
+    name: AstrBot 4.29.4 / Python 3.12
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      ASTRBOT_ROOT: ${{ runner.temp }}/astrbot-test-data
+      PYTHONDONTWRITEBYTECODE: '1'
+      TESTING: 'true'
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Checkout official AstrBot 4.29.4
+        uses: actions/checkout@v7
+        with:
+          repository: AstrBotDevs/AstrBot
+          ref: 61335414433db721b3f7ecc93f90deafe0a59d78
+          path: .ci/astrbot
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install official dependencies and test tools
+        run: |
+          python -m pip install uv
+          uv sync --project .ci/astrbot --dev --no-install-project
+          uv pip install --python .ci/astrbot/.venv/bin/python pytest-subtests
+      - name: Lint plugin and tests
+        run: .ci/astrbot/.venv/bin/python -m ruff check --no-cache main.py oauth_plug_openai_codex tests .github/scripts
+      - name: Verify official host and run plugin suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.ci/astrbot
+          OFFICIAL_ASTRBOT_ROOT: ${{ github.workspace }}/.ci/astrbot
+        run: .ci/astrbot/.venv/bin/python .github/scripts/test_official.py
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-astrbot-test-results
+          path: test-results.xml
+          if-no-files-found: ignore
