@@ -11,8 +11,10 @@ from typing import Any
 DEFAULT_MAX_EVENT_BYTES = 4 * 1024 * 1024
 
 
-def iter_json_sse_text(text: str) -> Iterator[dict[str, Any]]:
+def iter_json_sse_text(text: str, *, max_event_bytes: int = DEFAULT_MAX_EVENT_BYTES) -> Iterator[dict[str, Any]]:
     """Decode a buffered SSE response with the same framing as a live stream."""
+    if max_event_bytes <= 0:
+        raise ValueError("SSE 事件大小上限必须大于零。")
     data_lines: list[str] = []
     data_bytes = 0
     for line in [*re.split(r"\r\n|\r|\n", text.removeprefix("\ufeff")), ""]:
@@ -22,6 +24,8 @@ def iter_json_sse_text(text: str) -> Iterator[dict[str, Any]]:
             payload = "\n".join(data_lines)
             data_lines = []
             data_bytes = 0
+            if not payload.strip():
+                continue
             if payload.strip() == "[DONE]":
                 return
             try:
@@ -37,7 +41,7 @@ def iter_json_sse_text(text: str) -> Iterator[dict[str, Any]]:
             continue
         value = value.removeprefix(" ") if separator else ""
         data_bytes += len(value.encode("utf-8")) + bool(data_lines)
-        if data_bytes > DEFAULT_MAX_EVENT_BYTES:
+        if data_bytes > max_event_bytes:
             raise ValueError("OpenAI OAuth SSE 事件超过大小上限。")
         data_lines.append(value)
 
@@ -87,6 +91,10 @@ async def iter_json_sse_events(
                 data_lines = []
                 data_bytes = 0
 
+                if not payload.strip():
+                    if reached_eof:
+                        return
+                    continue
                 if payload.strip() == "[DONE]":
                     return
 

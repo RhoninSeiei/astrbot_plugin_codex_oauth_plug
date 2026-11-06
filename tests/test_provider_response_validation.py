@@ -197,7 +197,7 @@ class ProviderResponseValidationTests(unittest.TestCase):
                 self.assertEqual(result.tools_call_name, ["weather"])
                 self.assertEqual(result.tools_call_ids, ["call_1"])
 
-    def test_invalid_tool_arguments_reject_the_completion(self):
+    def test_invalid_tool_arguments_are_not_executable(self):
         missing = object()
         for arguments in ('{"city":', "[]", "null", "42", '{"value":NaN}', '{"value":Infinity}', '{"value":-Infinity}', None, [], missing):
             with self.subTest(arguments=arguments):
@@ -208,8 +208,12 @@ class ProviderResponseValidationTests(unittest.TestCase):
                 }
                 if arguments is not missing:
                     item["arguments"] = arguments
-                with self.assertRaises(Exception):
-                    self.parse_completion({"status": "completed", "output": [item]})
+                result = self.parse_completion({"status": "completed", "output": [item]})
+                self.assertEqual(result.tools_call_args, [])
+                self.assertEqual(result.tools_call_name, [])
+                self.assertEqual(result.tools_call_ids, [])
+                self.assertEqual(len(result.rejected_tool_calls), 1)
+                self.assertEqual(set(result.rejected_tool_calls[0]), {"name", "call_id", "code"})
 
     def test_backend_error_never_echoes_untrusted_error_fields(self):
         secret = "SECRET_PROMPT_ACCESS_TOKEN_8c3e"

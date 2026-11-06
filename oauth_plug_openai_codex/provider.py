@@ -40,6 +40,7 @@ from .provider_runtime_compat import (
 
 from .headers import build_codex_backend_headers
 from .image_media import decode_result, reference_image_url
+from .rejected_tools import apply_tool_rejections, parse_tool_arguments, rejected_tool_call
 from .service import OAUTH_PLACEHOLDER_KEY, get_service
 
 oauth_provider_stat_kind: ContextVar[str] = ContextVar(
@@ -585,50 +586,39 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         attempted_version = self._oauth_shared_state.version
 
         text_parts: list[str] = []
-        malformed_lines = 0
         async with self._open_oauth_http_client(
             follow_redirects=True,
             timeout=request_timeout,
         ) as client:
             async with client.stream(
-                "POST",
-                f"{self.base_url}/responses",
-                headers=headers,
-                json=payload,
+                "POST", f"{self.base_url}/responses", headers=headers, json=payload,
             ) as response:
-                async for line in response.aiter_lines():
-                    text_parts.append(line)
-                    stripped = line.strip()
-                    if not stripped.startswith("data:"):
-                        continue
-                    raw = stripped[5:].strip()
-                    if not raw:
-                        continue
-                    if raw == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(raw)
-                    except Exception:
-                        malformed_lines += 1
-                        continue
-                    if not isinstance(event, dict):
-                        malformed_lines += 1
-                        continue
-                    event_type = event.get("type")
-                    if event_type in {
-                        "response.completed",
-                        "response.error",
-                        "response.failed",
-                    }:
-                        break
+                if response.status_code < 200 or response.status_code >= 300:
+                    text_parts.append((await response.aread()).decode("utf-8", errors="replace"))
+                else:
+                    async def captured_lines():
+                        total_bytes = 0
+                        async for line in response.aiter_lines():
+                            total_bytes += len(line.encode("utf-8")) + 1
+                            if total_bytes > IMAGE_WEBSOCKET_MAX_TRANSCRIPT_BYTES:
+                                raise ValueError("Codex image response exceeds size limit")
+                            text_parts.append(line)
+                            yield line
 
-        if malformed_lines:
-            # 容错行为不变（坏行照常跳过），但计数并只警告一次，
-            # 便于发现后端流格式漂移，而不是长期静默丢事件。
-            logger.warning(
-                "Codex 图片后端响应中有 %d 行 SSE 数据无法解析，已跳过。",
-                malformed_lines,
-            )
+                    try:
+                        async with aclosing(iter_json_sse_events(
+                            captured_lines(), max_event_bytes=IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES,
+                        )) as events:
+                            async for event in events:
+                                if event.get("type") in {
+                                    "response.completed", "response.error", "response.failed",
+                                    "response.incomplete", "error",
+                                }:
+                                    break
+                    except ValueError:
+                        logger.warning("Codex image SSE rejected 1 invalid event.")
+                        raise ValueError("Codex image SSE event is invalid.") from None
+
         return response.status_code, "\n".join(text_parts), attempted_version
 
     async def _request_image_backend(
@@ -758,7 +748,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                                 event = json.loads(message.data)
                                 if not isinstance(event, dict):
                                     raise OpenAIOAuthImageStreamError("outcome_unknown")
-                                lines.append("data: " + message.data)
+                                lines.append("data: " + json.dumps(event, ensure_ascii=False, separators=(",", ":")))
                                 event_type = event.get("type")
                                 if event_type in {
                                     "error",
@@ -776,9 +766,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                                     )
                                     if status == 429:
                                         reason = "rate_limited"
-                                    raise OpenAIOAuthImageStreamError(
-                                        reason, status_code=status
-                                    )
+                                    error = OpenAIOAuthImageStreamError(reason, status_code=status)
+                                    response_data = event.get("response", event)
+                                    if isinstance(response_data, dict):
+                                        usage = self._extract_response_usage(response_data.get("usage"))
+                                        if usage is not None:
+                                            setattr(error, "_astrbot_token_usage", usage)
+                                    raise error
                                 if event_type == "response.completed":
                                     return self._parse_backend_response(
                                         "\n\n".join(lines)
@@ -851,6 +845,26 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             status_code,
         )
 
+    def _backend_response_error(self, data: Any) -> Exception:
+        status_code = self._extract_stream_error_status_code(data) if isinstance(data, dict) else None
+        self._log_backend_failure(data, status_code)
+        message = "Codex backend response failed: " + self._compact_backend_error(data)
+        error = ProviderRequestError(message, status_code=status_code) if status_code is not None else RuntimeError(message)
+        payload = data.get("response", data) if isinstance(data, dict) else {}
+        if isinstance(payload, dict):
+            usage = self._extract_response_usage(payload.get("usage"))
+            if usage is not None:
+                setattr(error, "_astrbot_token_usage", usage)
+        return error
+
+    @staticmethod
+    def _buffered_sse_events(text: str):
+        try:
+            yield from iter_json_sse_text(text, max_event_bytes=IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES)
+        except ValueError:
+            logger.warning("Codex backend SSE rejected 1 invalid event.")
+            raise ValueError("Codex backend SSE event is invalid.") from None
+
     def _format_backend_error(self, status_code: int, text: str) -> str:
         try:
             data = json.loads(text)
@@ -875,20 +889,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 raise ValueError("Codex backend response contains invalid JSON") from None
             events = [data]
         else:
-            events = iter_json_sse_text(text)
+            events = self._buffered_sse_events(text)
         for event in events:
             response = event.get("response", event)
             if isinstance(response, dict):
                 status = response.get("status")
                 if status in ("failed", "incomplete", "cancelled"):
-                    status_code = self._extract_stream_error_status_code(event)
-                    self._log_backend_failure(event, status_code)
-                    if status_code is not None:
-                        raise ProviderRequestError(
-                            "Codex response failed or did not complete",
-                            status_code=status_code,
-                        )
-                    raise RuntimeError("Codex response failed or did not complete")
+                    raise self._backend_response_error(event)
             event_type = event.get("type")
             if event_type in {
                 "error",
@@ -927,15 +934,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             else "".join(output_text_parts)
         )
         if error_payload:
-            status_code = self._extract_stream_error_status_code(error_payload)
-            self._log_backend_failure(error_payload, status_code)
-            message = (
-                "Codex backend returned error event: "
-                f"{self._compact_backend_error(error_payload)}"
-            )
-            if status_code is not None:
-                raise ProviderRequestError(message, status_code=status_code)
-            raise RuntimeError(message)
+            raise self._backend_response_error(error_payload)
         if completed_response is not None:
             if not completed_response.get("output") and output_items:
                 completed_response["output"] = output_items
@@ -1285,17 +1284,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
     @staticmethod
     def _input_mentions_json(value) -> bool:
         if isinstance(value, str):
-            return "json" in value.lower()
-        if isinstance(value, dict):
+            return "json" in value.casefold()
+        if isinstance(value, list):
             return any(
-                ProviderOAuthPlugOpenAICodex._input_mentions_json(item)
-                for key, item in value.items()
-                if key in {"text", "content"}
-            )
-        if isinstance(value, (list, tuple)):
-            return any(
-                ProviderOAuthPlugOpenAICodex._input_mentions_json(item)
-                for item in value
+                isinstance(part, dict) and part.get("type") == "input_text"
+                and isinstance(part.get("text"), str) and "json" in part["text"].casefold()
+                for part in value
             )
         return False
 
@@ -1374,54 +1368,6 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
             if not isinstance(text_config, dict):
                 raise ValueError("text must be an object")
             params["text"] = {**text_config, "format": merged_format}
-            if format_type == "json_object":
-                # Codex 后端要求 json_object 请求的输入消息里出现过 "json"
-                # 字样，否则以 invalid_request_error 秒拒；只补在
-                # instructions 里过不了关，后端的扫描只认 input 消息条目。
-                # 结构化输出的调用方不保证提示词里有这个词，故在消息正文
-                # 通篇没提 json 时往最后一条用户消息后附一个格式说明
-                # 文本段兜底（无用户消息时退到最后一条消息，再没有就
-                # 新建一条用户消息）；已提到时不做任何改动。
-                note = "Output format: json."
-                message_items = [
-                    item
-                    for item in backend_input
-                    if isinstance(item, dict) and item.get("type") == "message"
-                ]
-                if not any(
-                    ProviderOAuthPlugOpenAICodex._input_mentions_json(item)
-                    for item in message_items
-                ):
-                    if "json" not in (instructions or "").lower():
-                        params["instructions"] = (
-                            f"{instructions}\n{note}" if instructions else note
-                        )
-                    target_item = None
-                    for item in reversed(message_items):
-                        if item.get("role") == "user":
-                            target_item = item
-                            break
-                    if target_item is None and message_items:
-                        target_item = message_items[-1]
-                    if target_item is None:
-                        backend_input.append(
-                            {
-                                "type": "message",
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": note}],
-                            }
-                        )
-                    else:
-                        content = target_item.get("content")
-                        if isinstance(content, list):
-                            part_type = "input_text"
-                            for part in content:
-                                if isinstance(part, dict) and part.get("type"):
-                                    part_type = str(part["type"])
-                                    break
-                            content.append({"type": part_type, "text": note})
-                        elif isinstance(content, str):
-                            target_item["content"] = f"{content}\n{note}"
 
         request_search_mode = str(oauth_web_search or "inherit").strip().lower()
         if request_search_mode not in {"inherit", "disabled", "cached", "live"}:
@@ -1526,6 +1472,28 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     params.pop("include", None)
             elif include == "message.output_text.logprobs":
                 params.pop("include", None)
+        text_options = params.get("text")
+        if (
+            isinstance(text_options, dict)
+            and isinstance(text_options.get("format"), dict)
+            and text_options["format"].get("type") == "json_object"
+        ):
+            messages = [item for item in params["input"] if item.get("type") == "message"]
+            if not any(self._input_mentions_json(item.get("content")) for item in messages):
+                note = {"type": "input_text", "text": "Output format: json."}
+                params["input"] = list(params["input"])
+                for index in range(len(params["input"]) - 1, -1, -1):
+                    item = params["input"][index]
+                    if item.get("type") != "message" or item.get("role") != "user":
+                        continue
+                    content = item.get("content")
+                    parts = list(content) if isinstance(content, list) else (
+                        [{"type": "input_text", "text": content}] if isinstance(content, str) and content else []
+                    )
+                    params["input"][index] = {**item, "content": [*parts, note]}
+                    break
+                else:
+                    params["input"].append({"type": "message", "role": "user", "content": [note]})
         return params
 
     @staticmethod
@@ -1586,6 +1554,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         )
         reasoning_parts: list[str] = []
         tool_args: list[dict[str, Any]] = []
+        rejected_calls: list[dict[str, str]] = []
         tool_names: list[str] = []
         tool_ids: list[str] = []
         message_text_parts: list[str] = []
@@ -1616,16 +1585,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     if isinstance(item, dict)
                     else getattr(item, "arguments", None)
                 )
-                try:
-                    parsed_args = json.loads(arguments) if isinstance(arguments, str) else arguments
-                except (ValueError, TypeError):
-                    raise ValueError("Codex tool arguments contain invalid JSON") from None
-                if not isinstance(parsed_args, dict):
-                    raise ValueError("Codex tool arguments must be a JSON object")
-                try:
-                    json.dumps(parsed_args, allow_nan=False)
-                except (ValueError, TypeError):
-                    raise ValueError("Codex tool arguments contain non-JSON values") from None
+                parsed_args, rejection_code = parse_tool_arguments(arguments)
+                if rejection_code is not None:
+                    name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+                    call_id = item.get("call_id") if isinstance(item, dict) else getattr(item, "call_id", None)
+                    rejected_calls.append(rejected_tool_call(name, call_id, rejection_code))
+                    continue
                 tool_args.append(parsed_args)
                 tool_names.append(
                     str(
@@ -1672,6 +1637,11 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     message_text_parts.append("".join(item_text_parts).strip())
 
         output_text = output_text or "\n".join(message_text_parts)
+        output_text = apply_tool_rejections(
+            llm_response, rejected_calls, output_text, has_valid_calls=bool(tool_args)
+        )
+        if rejected_calls:
+            logger.warning("Codex rejected %d invalid tool calls; arguments were not exposed.", len(rejected_calls))
         citations = self._extract_url_citations(response)
         if output_text:
             if citations:
@@ -2213,8 +2183,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 except asyncio.CancelledError:
                     image_status = "aborted"
                     raise
-                except Exception:
+                except Exception as exc:
                     image_status = "error"
+                    if response_usage is None:
+                        response_usage = getattr(exc, "_astrbot_token_usage", None)
+                        if response_usage is not None:
+                            total_usage = total_usage + response_usage
                     raise
                 finally:
                     if getattr(self, "_usage_recording_enabled", False):

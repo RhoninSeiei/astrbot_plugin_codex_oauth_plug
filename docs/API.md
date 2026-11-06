@@ -10,7 +10,7 @@ if provider is None:
     raise RuntimeError("未找到指定模型提供商")
 ```
 
-`provider_id` 使用 AstrBot 模型页面保存的实际 ID。类型为 `oauth_plug_openai_codex_chat_completion`，与内建 OAuth 类型独立。所有模型共享插件的账号授权；不要由调用方读取或更新令牌。
+`provider_id` 使用 AstrBot 模型页面保存的实际 ID。类型为 `oauth_plug_openai_codex_chat_completion`，与内建 OAuth 类型独立。所有模型共享插件的账号授权；不要由调用方读取或更新令牌。插件重载或提供商被禁用后，调用方应通过 Context 重新获取实例，不应长期缓存已关闭的实例。
 
 ## 聊天与流式输出
 
@@ -31,7 +31,9 @@ async for response in provider.text_chat_stream(prompt="介绍这个项目"):
 
 `response_format` 支持 `text`、`json_object` 和 `json_schema`，自动转换为 Responses 的 `text.format`。单次调用的格式优先于提供商配置，并保留 `text` 中其他设置。`json_schema` 需包含 `name` 和 `schema`；模型是否支持结构化输出由服务端决定。
 
-完成状态允许空回复，拒绝内容作为文本返回。失败或未完成响应、无效工具参数和畸形 SSE 会报错，不会作为成功回复或可执行工具调用返回。错误信息不包含服务端原始正文。
+完成状态允许空回复，拒绝内容作为文本返回。失败或未完成响应、畸形 SSE 会报错，错误信息不包含服务端原始正文。最终格式为 `json_object` 且输入缺少 JSON 提示时，插件会补充独立文本段，不修改助手历史。
+
+无效工具参数不会进入 `tools_call_*` 可执行列表，同一响应的正常文本和有效调用继续保留。`rejected_tool_calls` 仅包含经过限制的 `name`、`call_id` 和固定错误码，不包含原始参数。支持该字段的宿主可由其 runner 处理；旧宿主只得到安全降级结果与固定提示，插件不进行隐藏重试，也不保证自动纠正。旧宿主在继续执行有效工具后可能替换这一提示，调用方可检查返回元数据。
 
 推理强度从高到低依次取：
 

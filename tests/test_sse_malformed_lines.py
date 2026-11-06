@@ -42,7 +42,7 @@ def _fake_client_class(lines):
 
 
 class SseMalformedLineCountingTests(unittest.TestCase):
-    def run_scan(self, lines):
+    def run_scan(self, lines, *, malformed=False):
         provider = provider_helpers.ProviderImageGenerationTests()._make_provider(
             "unused"
         )
@@ -53,33 +53,32 @@ class SseMalformedLineCountingTests(unittest.TestCase):
         ), patch(
             "oauth_plug_openai_codex.provider.logger.warning"
         ) as warning:
-            status, _text, _version = asyncio.run(
-                provider._request_image_backend_once({"stream": True}, 12.5)
-            )
+            if malformed:
+                with self.assertRaises(ValueError) as caught:
+                    asyncio.run(provider._request_image_backend_once({"stream": True}, 12.5))
+                self.assertNotIn("SECRET", str(caught.exception))
+                status = None
+            else:
+                status, _text, _version = asyncio.run(
+                    provider._request_image_backend_once({"stream": True}, 12.5)
+                )
         return status, warning
 
-    def test_malformed_lines_are_counted_and_warned_once(self):
-        status, warning = self.run_scan(
-            [
-                'data: {"type":"response.output_text.delta","delta":"x"}',
-                "data: {broken json",
-                "data: [1,2,3]",
-                ": comment line",
-                "data: ",
-                'data: {"type":"response.completed","response":{}}',
-            ]
-        )
-        self.assertEqual(status, 200)
+    def test_malformed_complete_event_is_rejected_and_warned_once(self):
+        status, warning = self.run_scan([
+            'data: {"type":"response.output_text.delta","delta":"x"}', "",
+            'data: {"SECRET":', 'data: bad-SECRET', "",
+            'data: {"type":"response.completed","response":{}}', "",
+        ], malformed=True)
+        self.assertIsNone(status)
         warning.assert_called_once()
-        self.assertEqual(warning.call_args.args[1], 2)
+        self.assertNotIn("SECRET", str(warning.call_args))
 
-    def test_clean_stream_does_not_warn(self):
-        status, warning = self.run_scan(
-            [
-                'data: {"type":"response.output_text.delta","delta":"x"}',
-                'data: {"type":"response.completed","response":{}}',
-            ]
-        )
+    def test_clean_multiline_stream_and_heartbeat_do_not_warn(self):
+        status, warning = self.run_scan([
+            "data:", "", ": comment", 'data: {"type":',
+            'data: "response.completed","response":{}}', "",
+        ])
         self.assertEqual(status, 200)
         warning.assert_not_called()
 

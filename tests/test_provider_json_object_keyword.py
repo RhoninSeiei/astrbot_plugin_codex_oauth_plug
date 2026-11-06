@@ -56,8 +56,8 @@ class ProviderJsonObjectKeywordTests(unittest.TestCase):
             if item.get("type") == "message" and item.get("role") == "user"
         ]
         self.assertEqual(len(user_items), 1)
-        self.assertIn(NOTE, user_items[0]["content"])
-        self.assertIn("json", params["instructions"].lower())
+        self.assertIn({"type": "input_text", "text": NOTE}, user_items[0]["content"])
+        self.assertEqual(params["instructions"], "你是一个复盘助手。")
 
     def test_appends_text_part_to_list_content(self):
         params = self.build(
@@ -103,12 +103,51 @@ class ProviderJsonObjectKeywordTests(unittest.TestCase):
         self.assertEqual(item["type"], "message")
         self.assertEqual(item["role"], "user")
         self.assertEqual(item["content"], [{"type": "input_text", "text": NOTE}])
-        self.assertEqual(params["instructions"], NOTE)
+        self.assertEqual(params["instructions"], "")
 
-    def test_falls_back_to_last_message_when_no_user_message(self):
+    def test_adds_user_message_without_modifying_assistant_history(self):
         params = self.build([{"role": "assistant", "content": "上次的结果"}])
-        self.assertEqual(len(params["input"]), 1)
-        self.assertIn(NOTE, params["input"][0]["content"])
+        self.assertEqual(len(params["input"]), 2)
+        self.assertEqual(params["input"][0]["content"], "上次的结果")
+        self.assertEqual(params["input"][1]["role"], "user")
+        self.assertEqual(params["input"][1]["content"], [{"type": "input_text", "text": NOTE}])
+
+    def test_final_format_and_media_boundaries(self):
+        shapes = [
+            [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}]}],
+            [{"role": "system", "content": "Return JSON."}],
+            [{"role": "assistant", "content": "Earlier answer"}],
+            [{"role": "tool", "tool_call_id": "call-one", "content": "JSON tool result"}],
+        ]
+        for messages in shapes:
+            for custom in (False, True):
+                with self.subTest(messages=messages, custom=custom):
+                    self.provider.provider_config["custom_extra_body"] = (
+                        {"text": {"format": {"type": "json_object"}, "verbosity": "low"}} if custom else {}
+                    )
+                    payload = {"messages": messages}
+                    if not custom:
+                        payload["response_format"] = {"type": "json_object"}
+                    original = copy.deepcopy(payload)
+                    before = self.provider._convert_messages_to_backend_input(messages)[1]
+                    params = self.provider._build_responses_params(payload, None)
+                    self.assertEqual(payload, original)
+                    self.assertTrue(any("json" in text.lower() for text in _all_text(params["input"])))
+                    for old, new in zip(before, params["input"]):
+                        if old.get("role") != "user":
+                            self.assertEqual(new, old)
+                    for item in params["input"]:
+                        if isinstance(item.get("content"), list):
+                            for part in item["content"]:
+                                if "text" in part:
+                                    self.assertEqual(part["type"], "input_text")
+
+    def test_request_format_override_disables_custom_json_guard(self):
+        self.provider.provider_config["custom_extra_body"] = {"text": {"format": {"type": "json_object"}}}
+        for fmt in ({"type": "text"}, {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}}):
+            messages = [{"role": "user", "content": "Answer"}]
+            params = self.provider._build_responses_params({"messages": messages, "response_format": fmt}, None)
+            self.assertEqual(_all_text(params["input"]), ["Answer"])
 
     def test_text_format_untouched(self):
         params = self.build(

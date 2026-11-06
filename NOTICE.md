@@ -24,4 +24,6 @@
 
 本次改动日期为 2026-09-05。主要修改包括插件相对导入、插件级凭据服务与持久化、旧版核心接口兼容、单次图片超时、资源清理和独立插件测试适配。其他本轮改动见 [CHANGELOG](CHANGELOG.md)。
 
+v0.6.0 的 `oauth_plug_openai_codex/rejected_tools.py` 参考 AstrBot 4.29.4 维护版本的 `astrbot/core/provider/oauth/tool_arguments.py`，并增加旧宿主兼容处理；JSON 与 SSE 边界处理同步该版本的修复。
+
 本仓库提供组合版本的对应源代码。分发或修改本版本时，请遵循 LICENSE 中的源码提供、许可及版权声明保留要求。
