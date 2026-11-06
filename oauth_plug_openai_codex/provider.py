@@ -585,6 +585,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         attempted_version = self._oauth_shared_state.version
 
         text_parts: list[str] = []
+        malformed_lines = 0
         async with self._open_oauth_http_client(
             follow_redirects=True,
             timeout=request_timeout,
@@ -608,8 +609,10 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     try:
                         event = json.loads(raw)
                     except Exception:
+                        malformed_lines += 1
                         continue
                     if not isinstance(event, dict):
+                        malformed_lines += 1
                         continue
                     event_type = event.get("type")
                     if event_type in {
@@ -619,6 +622,13 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                     }:
                         break
 
+        if malformed_lines:
+            # 容错行为不变（坏行照常跳过），但计数并只警告一次，
+            # 便于发现后端流格式漂移，而不是长期静默丢事件。
+            logger.warning(
+                "Codex 图片后端响应中有 %d 行 SSE 数据无法解析，已跳过。",
+                malformed_lines,
+            )
         return response.status_code, "\n".join(text_parts), attempted_version
 
     async def _request_image_backend(
