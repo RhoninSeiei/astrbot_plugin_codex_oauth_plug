@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
-      ASTRBOT_ROOT: ${{ runner.temp }}/astrbot-test-data
+      ASTRBOT_ROOT: ${{ github.workspace }}/.ci-data
       PYTHONDONTWRITEBYTECODE: '1'
       TESTING: 'true'
     steps:
