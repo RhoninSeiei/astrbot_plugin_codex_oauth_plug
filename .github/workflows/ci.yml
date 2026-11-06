@@ -3,6 +3,7 @@ name: Official AstrBot CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -57,3 +58,30 @@ jobs:
           name: official-astrbot-test-results
           path: test-results.xml
           if-no-files-found: ignore
+
+  release:
+    name: Publish versioned installation package
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: official-astrbot
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Build package and checksum
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python .github/scripts/package_release.py "$RELEASE_TAG"
+      - name: Publish release with verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS --verify-tag --draft --title "$RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
+          gh release edit "$RELEASE_TAG" --draft=false --latest

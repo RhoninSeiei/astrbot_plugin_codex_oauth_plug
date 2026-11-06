@@ -195,7 +195,7 @@ Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿
 
 ## 开发与版本
 
-[自动 CI](https://github.com/RhoninSeiei/astrbot_plugin_codex_oauth_plug/actions/workflows/ci.yml) 使用固定提交的官方 AstrBot 4.29.4 和 Python 3.12，运行插件完整测试及静态检查，不依赖定制核心。
+[自动 CI](https://github.com/RhoninSeiei/astrbot_plugin_codex_oauth_plug/actions/workflows/ci.yml) 使用固定提交的官方 AstrBot 4.29.4 和 Python 3.12，运行插件完整测试及静态检查，不依赖定制核心。推送与 `metadata.yaml` 一致的 `v*` 版本标签后，CI 在检查通过时自动发布安装 ZIP 和 `SHA256SUMS`；安装包包含运行代码、文档与许可证。
 
 - [开发接口：聊天、推理、搜索、生图、音频和 Web API](docs/API.md)
 - [更新日志](CHANGELOG.md)
