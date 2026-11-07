@@ -82,6 +82,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          gh release create "$RELEASE_TAG" dist/*.zip dist/SHA256SUMS --verify-tag --draft --title "$RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md
-          gh release edit "$RELEASE_TAG" --draft=false --latest
+        run: python .github/scripts/publish_release.py
