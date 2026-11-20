@@ -135,7 +135,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         },
         "gpt-6.1-terra": {
             "default_reasoning_effort": "low",
-            "supported_reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+            "supported_reasoning_efforts": ("none", "low", "medium", "high", "xhigh", "max"),
         },
         "gpt-6.1-sol": {
             "default_reasoning_effort": "low",

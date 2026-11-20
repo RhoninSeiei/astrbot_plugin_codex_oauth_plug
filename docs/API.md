@@ -167,6 +167,6 @@ Realtime 需要 `websockets>=15` 的 asyncio 客户端支持，且账号必须�
 
 ## 2026-11-20 兼容基线
 
-插件直接使用 OAuth HTTP 协议，没有内嵌或启动 Codex CLI。客户端请求标记同步 [Codex 0.171.0](https://github.com/openai/codex/releases/tag/rust-v0.171.0)，型号及推理能力参考该标签的 `codex-rs/models-manager/models.json`。GPT-6.2 Sol 默认窗口 500K、Astra 272K，仍以账号目录为优先；GPT-6.1 Sol 和 Terra 使用同一目录对应能力。单次请求支持 `low` 至 `max`，`ultra` 的自动任务委派不由此 Provider 实现。未设置强度时继续由后端决定，不强行发送目录默认值。
+插件直接使用 OAuth HTTP 协议，没有内嵌或启动 Codex CLI。客户端请求标记同步 [Codex 0.171.0](https://github.com/openai/codex/releases/tag/rust-v0.171.0)，型号及推理能力参考该标签的 `codex-rs/models-manager/models.json`。GPT-6.2 Sol 默认窗口 500K、Astra 272K，仍以账号目录为优先；GPT-6.1 Sol 和 Terra 的 `low` 至 `max` 来自同一目录。该目录未列出 Terra 的 `none`，但维护会话用 0.171.0 客户端标记直接请求官方 Codex Responses 获得 HTTP 200 和 `response.completed`，因此 Terra 保留 `none`，`off` 仍归一化为 `none`。`ultra` 的自动任务委派不由此 Provider 实现。未设置强度时继续由后端决定，不强行发送目录默认值。
 
-CI 采用官方 AstrBot 4.29.4 和 [OpenAI Python SDK 3.57.0](https://github.com/openai/openai-python/releases/tag/v3.57.0)，显式打印并校验 SDK 版本。SDK 由 AstrBot 管理，插件不会自行升级运行宿主的依赖。此次采用官方源码与协议形状回归，没有使用生产凭据或执行真实账号推理，不将此结果称为账号模型可用性或性能提升实测。
+CI 采用官方 AstrBot 4.29.4 和 [OpenAI Python SDK 3.57.0](https://github.com/openai/openai-python/releases/tag/v3.57.0)，显式打印并校验 SDK 版本。SDK 由 AstrBot 管理，插件不会自行升级运行宿主的依赖。CI 使用模拟上游响应验证插件行为。上面的 Terra 验证仅覆盖官方后端接受 `none`，不代表插件端到端的账号可用性、满窗口或吞吐验证。

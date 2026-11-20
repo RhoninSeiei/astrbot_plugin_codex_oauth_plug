@@ -19,8 +19,14 @@ class StableCodexModelsTests(unittest.IsolatedAsyncioTestCase):
                 for name in (model, model + "-2026-11-17"):
                     params = provider._build_responses_params({"model": name, "messages": [], "reasoning_effort": "max"}, None)
                     self.assertEqual(params["reasoning"]["effort"], "max")
-                    with self.assertRaisesRegex(ValueError, "none"):
-                        provider._build_responses_params({"model": name, "messages": [], "reasoning_effort": "none"}, None)
+                    for effort in ("none", "off"):
+                        payload = {"model": name, "messages": [], "reasoning_effort": effort}
+                        if model == "gpt-6.1-terra":
+                            params = provider._build_responses_params(payload, None)
+                            self.assertEqual(params["reasoning"]["effort"], "none")
+                        else:
+                            with self.assertRaisesRegex(ValueError, "none"):
+                                provider._build_responses_params(payload, None)
                     with self.assertRaisesRegex(ValueError, "ultra"):
                         provider._build_responses_params({"model": name, "messages": [], "reasoning_effort": "ultra"}, None)
                 provider.provider_config["custom_extra_body"] = {"top_p": .5, "top_logprobs": 2, "include": ["message.output_text.logprobs", "reasoning.encrypted_content"]}
