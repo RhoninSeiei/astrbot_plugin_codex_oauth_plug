@@ -193,9 +193,11 @@ class NovemberProviderTests(unittest.IsolatedAsyncioTestCase):
     def test_terra_reasoning_and_backend_error_logging(self):
         provider = self.provider()
         self.assertIn("gpt-6.1-terra", provider.model_capabilities)
-        for effort in ("none", "low", "medium", "high", "xhigh", "max"):
+        for effort in ("low", "medium", "high", "xhigh", "max"):
             request = provider._build_responses_params({"messages": [], "model": "gpt-6.1-terra", "reasoning_effort": effort}, None)
             self.assertEqual(request["reasoning"]["effort"], effort)
+        with self.assertRaisesRegex(ValueError, "none"):
+            provider._build_responses_params({"messages": [], "model": "gpt-6.1-terra", "reasoning_effort": "none"}, None)
         secret = "secret-prompt-token"
         with patch("oauth_plug_openai_codex.provider.logger.warning") as warning:
             with self.assertRaises(Exception):
