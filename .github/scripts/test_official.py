@@ -14,6 +14,10 @@ def main() -> int:
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     assert project["project"]["version"] == "4.29.4"
 
+    import openai
+    assert openai.__version__ == "3.57.0"
+    print(f"OpenAI Python SDK: {openai.__version__}", flush=True)
+
     # Preload the actual host so test helpers cannot silently install a fake one.
     from astrbot.core.provider.sources import openai_source
     from astrbot.core.agent.runners.tool_loop_agent_runner import ToolLoopAgentRunner

@@ -86,7 +86,9 @@ Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿
 
 | 模型 ID | 可用推理强度 |
 | --- | --- |
-| `gpt-6.1-terra` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-6.2-sol` | `low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-6.2-astra` | `low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-6.1-terra` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6.1-sol` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6-astra` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6-sol` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
@@ -115,7 +117,7 @@ Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿
 }
 ```
 
-不填写时由服务端决定默认强度。`off` 按 `none` 处理，GPT-6.1 Sol 和 GPT-6 Astra 不接受 `none`；单次模型请求不接受 `ultra`。
+不填写时由服务端决定默认强度。`off` 按 `none` 处理，GPT-6.2 Sol、GPT-6.2 Astra、GPT-6.1 Sol、GPT-6.1 Terra 和 GPT-6 Astra 不接受 `none`；单次模型请求不接受 `ultra`。
 
 ### 上下文窗口与用量
 

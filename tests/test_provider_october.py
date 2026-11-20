@@ -17,7 +17,7 @@ class OctoberProviderParityTests(unittest.TestCase):
     def test_gpt_6_1_sol_capability_and_request_filtering(self):
         provider = self._provider()
         capability = provider.model_capabilities["gpt-6.1-sol"]
-        self.assertEqual(capability["default_reasoning_effort"], "medium")
+        self.assertEqual(capability["default_reasoning_effort"], "low")
         self.assertEqual(
             capability["supported_reasoning_efforts"],
             ("low", "medium", "high", "xhigh", "max"),
