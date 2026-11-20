@@ -170,6 +170,7 @@ async def resolve_context_budget(
         raise RuntimeError("OAuth provider is closed")
     known_window = 128000
     for prefix, limit in (
+        ("gpt-6.2-sol", 500000), ("gpt-6.2-astra", 272000),
         ("gpt-6.1-sol", 500000), ("gpt-6.1-terra", 500000),
         ("gpt-6-luna", 272000), ("gpt-6-astra", 272000), ("gpt-6-sol", 272000),
     ):

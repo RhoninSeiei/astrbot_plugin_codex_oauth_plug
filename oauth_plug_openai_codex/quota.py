@@ -1,4 +1,4 @@
-"""Read and normalize the Codex account's usage without changing OAuth state."""
+"""Read and normalize Codex usage, with one same-account OAuth recovery."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import math
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import httpx
 
@@ -17,6 +17,13 @@ import httpx
 _CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 _USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 _CACHE_SECONDS = 60
+
+
+class _RequestIdentity(NamedTuple):
+    headers: dict[str, str]
+    fingerprint: str
+    account: str
+    version: int | None
 
 
 def _number(value: Any, *, minimum: float = 0, maximum: float | None = None) -> float | None:
@@ -135,9 +142,13 @@ class QuotaReader:
         self._closed = False
 
     @staticmethod
-    def _identity(provider: Any) -> tuple[dict[str, str], str] | None:
+    def _identity(provider: Any) -> _RequestIdentity | None:
         try:
-            headers = provider._build_backend_headers()
+            build_versioned = getattr(provider, "_build_backend_headers_with_version", None)
+            if callable(build_versioned):
+                headers, version = build_versioned()
+            else:
+                headers, version = provider._build_backend_headers(), None
         except Exception:
             return None
         if not isinstance(headers, dict):
@@ -151,7 +162,7 @@ class QuotaReader:
         fingerprint = hashlib.sha256(f"{authorization}\0{account}".encode()).hexdigest()
         safe_headers = {key: value for key, value in safe_headers.items() if key.lower() != "accept"}
         safe_headers["Accept"] = "application/json"
-        return safe_headers, fingerprint
+        return _RequestIdentity(safe_headers, fingerprint, account, version if type(version) is int else None)
 
     async def read(self, provider: Any) -> dict[str, Any]:
         if self._closed:
@@ -162,11 +173,16 @@ class QuotaReader:
         async with self._lock:
             if self._closed:
                 return {"status": "closed"}
-            for _ in range(3):
+            recovery_account: str | None = None
+            for attempt in range(3):
                 identity = self._identity(provider)
+                if recovery_account is not None and (
+                    identity is None or identity.account != recovery_account
+                ):
+                    return {"status": "reauth_required", "http_status": 401}
                 if identity is None:
                     return {"status": "unbound"}
-                headers, fingerprint = identity
+                fingerprint = identity.fingerprint
                 now = self._clock()
                 cached = self._cache.get(fingerprint)
                 if cached is not None and 0 <= now - cached[0] < _CACHE_SECONDS:
@@ -183,7 +199,7 @@ class QuotaReader:
                         trust_env=False,
                         follow_redirects=False,
                     ) as client:
-                        response = await client.get(_USAGE_URL, headers=headers)
+                        response = await client.get(_USAGE_URL, headers=identity.headers)
                 except Exception:
                     if self._closed:
                         return {"status": "closed"}
@@ -191,16 +207,37 @@ class QuotaReader:
 
                 if self._closed:
                     return {"status": "closed"}
+                status = response.status_code
+                if status == 401:
+                    unauthorized = {"status": "reauth_required", "http_status": 401}
+                    refresh = getattr(provider, "_refresh_after_auth_failure", None)
+                    # An in-flight credential change may already have caused a GET replay.
+                    if attempt != 0 or identity.version is None or not callable(refresh):
+                        return unauthorized
+                    current = self._identity(provider)
+                    if current is None or current.account != identity.account:
+                        return unauthorized
+                    try:
+                        refreshed = await refresh(identity.version)
+                    except Exception:
+                        refreshed = False
+                    if self._closed:
+                        return {"status": "closed"}
+                    if not refreshed:
+                        return unauthorized
+                    recovery_account = identity.account
+                    continue
+
                 current = self._identity(provider)
                 if current is None:
                     return {"status": "unbound"}
-                if current[1] != fingerprint:
+                if current.fingerprint != fingerprint:
+                    if recovery_account is not None:
+                        return {"status": "unavailable"}
                     continue
 
-                status = response.status_code
                 if status != 200:
                     category = {
-                        401: "reauth_required",
                         403: "forbidden",
                         429: "rate_limited",
                     }.get(status, "unavailable")

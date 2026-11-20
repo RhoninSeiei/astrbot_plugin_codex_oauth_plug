@@ -86,6 +86,8 @@ Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿
 
 | 模型 ID | 可用推理强度 |
 | --- | --- |
+| `gpt-6.2-sol` | `low`、`medium`、`high`、`xhigh`、`max` |
+| `gpt-6.2-astra` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6.1-terra` | `none`、`low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6.1-sol` | `low`、`medium`、`high`、`xhigh`、`max` |
 | `gpt-6-astra` | `low`、`medium`、`high`、`xhigh`、`max` |
@@ -115,7 +117,7 @@ Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿
 }
 ```
 
-不填写时由服务端决定默认强度。`off` 按 `none` 处理，GPT-6.1 Sol 和 GPT-6 Astra 不接受 `none`；单次模型请求不接受 `ultra`。
+不填写时由服务端决定默认强度。`off` 按 `none` 处理。GPT-6.2 Sol、GPT-6.2 Astra、GPT-6.1 Sol 和 GPT-6 Astra 不接受 `none`。单次模型请求不接受 `ultra`。
 
 ### 上下文窗口与用量
 
@@ -171,6 +173,8 @@ Docker 中的 `127.0.0.1` 指容器自身。代理运行在另一台电脑或宿
 `usage.enabled` 控制命令与工具查询；默认仅管理员私聊可用。群聊需要在 `usage.group_allowlist` 填入完整 `unified_msg_origin`，并且查询者仍须为管理员。
 
 ![额度查询工具：启用开关、目标提供商和群会话白名单](docs/assets/screenshots/usage-settings.png)
+
+额度查询遇到 401 时，若提供商支持凭据刷新，会沿用该账号凭据源刷新并最多重试一次 GET；再次失败则提示检查授权。管理员与群来源限制仍然适用。
 
 查询结果缓存 60 秒，不消耗模型推理额度。缺失字段表示未知，不能据此换算剩余请求次数。
 

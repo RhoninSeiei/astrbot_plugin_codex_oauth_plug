@@ -43,7 +43,7 @@ jobs:
         run: |
           python -m pip install uv
           uv sync --project .ci/astrbot --dev --no-install-project
-          uv pip install --python .ci/astrbot/.venv/bin/python pytest-subtests
+          uv pip install --python .ci/astrbot/.venv/bin/python pytest-subtests openai==3.57.0
       - name: Lint plugin and tests
         run: .ci/astrbot/.venv/bin/python -m ruff check --no-cache main.py oauth_plug_openai_codex tests .github/scripts
       - name: Verify official host and run plugin suite

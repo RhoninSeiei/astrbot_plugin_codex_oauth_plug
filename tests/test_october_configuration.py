@@ -14,8 +14,8 @@ class OctoberConfigurationTests(unittest.TestCase):
 
     def test_headers_identify_the_supported_client_version(self):
         headers = build_codex_backend_headers("test-access", "test-account")
-        self.assertEqual(headers["version"], "0.159.2")
-        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.159.2")
+        self.assertEqual(headers["version"], "0.171.0")
+        self.assertEqual(headers["User-Agent"], "codex_cli_rs/0.171.0")
 
     def test_image_model_setting_is_inherited_and_can_be_overridden(self):
         service = OpenAICodexOAuthService({"advanced": {"oauth_image_model": "gpt-image-2.5-flare"}})

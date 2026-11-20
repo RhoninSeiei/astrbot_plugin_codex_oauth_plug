@@ -40,6 +40,8 @@ class ServiceTests(unittest.TestCase):
             models,
             [
                 "gpt-5.6-sol",
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
                 "gpt-6.1-sol",
                 "gpt-6.1-terra",
                 "gpt-6-astra",
@@ -223,8 +225,8 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(post[1], "https://chatgpt.com/backend-api/codex/responses")
         self.assertTrue(post[2]["Authorization"].startswith("Bearer "))
         self.assertEqual(post[2]["chatgpt-account-id"], "account-id")
-        self.assertEqual(post[2]["version"], "0.159.2")
-        self.assertEqual(post[2]["User-Agent"], "codex_cli_rs/0.159.2")
+        self.assertEqual(post[2]["version"], "0.171.0")
+        self.assertEqual(post[2]["User-Agent"], "codex_cli_rs/0.171.0")
         self.assertEqual(
             post[2]["x-openai-internal-codex-residency"],
             "service-region",

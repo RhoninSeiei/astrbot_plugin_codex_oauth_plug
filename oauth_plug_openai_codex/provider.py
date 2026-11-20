@@ -7,6 +7,7 @@ import asyncio
 import copy
 import json
 import math
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -52,6 +53,18 @@ from .service import OAUTH_PLACEHOLDER_KEY, get_service
 oauth_provider_stat_kind: ContextVar[str] = ContextVar(
     "oauth_provider_stat_kind",
     default="text",
+)
+
+
+@dataclass
+class _OAuth401RetryBudget:
+    provider: object
+    available: bool = True
+
+
+_oauth_401_retry_budget: ContextVar[_OAuth401RetryBudget | None] = ContextVar(
+    "oauth_401_retry_budget",
+    default=None,
 )
 IMAGE_WEBSOCKET_MAX_MESSAGE_BYTES = 64 * 1024 * 1024
 IMAGE_WEBSOCKET_MAX_TRANSCRIPT_BYTES = 128 * 1024 * 1024
@@ -112,12 +125,20 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         "image_websocket": True,
     }
     model_capabilities = {
+        "gpt-6.2-sol": {
+            "default_reasoning_effort": "low",
+            "supported_reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+        },
+        "gpt-6.2-astra": {
+            "default_reasoning_effort": "low",
+            "supported_reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+        },
         "gpt-6.1-terra": {
-            "default_reasoning_effort": "medium",
+            "default_reasoning_effort": "low",
             "supported_reasoning_efforts": ("none", "low", "medium", "high", "xhigh", "max"),
         },
         "gpt-6.1-sol": {
-            "default_reasoning_effort": "medium",
+            "default_reasoning_effort": "low",
             "supported_reasoning_efforts": (
                 "low",
                 "medium",
@@ -455,6 +476,16 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 return True
             return await self._refresh_oauth_token()
 
+    def _consume_401_retry(self) -> bool:
+        budget = _oauth_401_retry_budget.get()
+        if budget is None or budget.provider is not self:
+            return True  # Direct transport calls already limit recovery to one attempt.
+        if not budget.available:
+            return False
+        # Replaying with an already-rotated token spends the same opportunity.
+        budget.available = False
+        return True
+
     def _build_backend_headers(self) -> dict[str, str]:
         headers, _version = self._build_backend_headers_with_version()
         return headers
@@ -506,7 +537,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         await self._ensure_fresh_oauth_token()
         status_code, text, attempted_version = await self._request_backend_once(payload)
 
-        if status_code in {401, 403}:
+        if status_code == 403 or (status_code == 401 and self._consume_401_retry()):
             auth_error = self._http_response_error(status_code, text)
             refreshed = await self._refresh_after_auth_failure(attempted_version)
             if refreshed:
@@ -1526,6 +1557,9 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 )
             model = str(params["model"] or "").strip().lower()
             capability = self.model_capabilities.get(model)
+            if capability is None:
+                base = re.sub(r"-\d{4}-\d{2}-\d{2}$", "", model)
+                capability = self.model_capabilities.get(base)
             if capability:
                 supported = capability["supported_reasoning_efforts"]
                 if effort == "max" and effort not in supported and "xhigh" in supported:
@@ -1546,12 +1580,12 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         params.pop("temperature", None)
         model_name = str(params.get("model") or "").strip().lower()
         if model_name.startswith(
-            ("gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
+            ("gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna")
         ):
             params.pop("top_p", None)
             params.pop("top_logprobs", None)
         strips_reasoning_sampling = model_name.startswith(
-            ("gpt-6.1-sol", "gpt-6-astra")
+            ("gpt-6.2-sol", "gpt-6.2-astra", "gpt-6.1-sol", "gpt-6-astra")
         ) or (
             model_name.startswith(("gpt-6-sol", "gpt-6-luna", "gpt-6.1-terra"))
             and reasoning.get("effort") != "none"
@@ -1834,6 +1868,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         request_kind = oauth_provider_stat_kind.get()
         start_time = time.time()
         kwargs["_oauth_tool_choice"] = tool_choice
+        auth_retry_token = _oauth_401_retry_budget.set(_OAuth401RetryBudget(self))
         try:
             response = await super().text_chat(
                 prompt=prompt,
@@ -1881,6 +1916,7 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
                 )
             raise
         finally:
+            _oauth_401_retry_budget.reset(auth_retry_token)
             current_attempt_ledger.reset(ledger_token)
 
         if not managed_by_agent:
@@ -1996,12 +2032,20 @@ class ProviderOAuthPlugOpenAICodex(OpenAIOAuthAudioMixin, ProviderOpenAIOfficial
         )
         budget = await resolve_context_budget(self, model=params["model"])
         params = trim_context_to_budget(params, budget)
-        response = await retry_provider_request(
-            "OpenAI OAuth",
-            lambda: self._request_backend(params),
-            retry_rate_limits=retry_rate_limits,
-            max_attempts=request_max_retries,
-        )
+        auth_budget = _oauth_401_retry_budget.get()
+        auth_retry_token = None
+        if auth_budget is None or auth_budget.provider is not self:
+            auth_retry_token = _oauth_401_retry_budget.set(_OAuth401RetryBudget(self))
+        try:
+            response = await retry_provider_request(
+                "OpenAI OAuth",
+                lambda: self._request_backend(params),
+                retry_rate_limits=retry_rate_limits,
+                max_attempts=request_max_retries,
+            )
+        finally:
+            if auth_retry_token is not None:
+                _oauth_401_retry_budget.reset(auth_retry_token)
         self._observe_backend_usage(response, complete=True)
         try:
             return await self._parse_responses_completion(response, tools)
